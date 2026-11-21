@@ -225,6 +225,13 @@ struct InspectorPaneView: View {
                                     .font(.caption.monospacedDigit())
                             }
                             GridRow {
+                                Text("Est. Filament (1.75mm)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text(item.formattedEstimatedFilamentLength)
+                                    .font(.caption.monospacedDigit())
+                            }
+                            GridRow {
                                 Text("File Size")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)

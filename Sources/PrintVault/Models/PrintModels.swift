@@ -240,10 +240,38 @@ public final class PrintFileItem {
         return String(format: "%.1f × %.1f × %.1f mm", dimensionX, dimensionY, dimensionZ)
     }
 
+    /// Effective plastic volume in cm³ assuming ~35% effective density (infill + walls)
+    public var estimatedEffectivePlasticVolumeCm3: Double {
+        guard estimatedVolumeCm3 > 0 else { return 0 }
+        return estimatedVolumeCm3 * 0.35
+    }
+
     /// Rough PLA weight estimate assuming ~35% effective density (infill + walls) and 1.24 g/cm³ PLA density
     public var estimatedPLAWeightGrams: Double {
-        guard estimatedVolumeCm3 > 0 else { return 0 }
-        return estimatedVolumeCm3 * 1.24 * 0.35
+        estimatedEffectivePlasticVolumeCm3 * 1.24
+    }
+
+    /// Rough filament length estimate in meters for standard 1.75mm diameter filament
+    public var estimatedFilamentLengthMeters: Double {
+        estimatedFilamentLengthMeters(diameterMm: 1.75)
+    }
+
+    /// Rough filament length estimate in meters for a given filament diameter in millimeters
+    public func estimatedFilamentLengthMeters(diameterMm: Double) -> Double {
+        guard estimatedEffectivePlasticVolumeCm3 > 0, diameterMm > 0 else { return 0 }
+        let radiusMm = diameterMm / 2.0
+        let crossSectionMm2 = Double.pi * radiusMm * radiusMm
+        // 1 cm³ = 1000 mm³, and 1 m = 1000 mm, so cm³ / mm² equals length directly in meters
+        return estimatedEffectivePlasticVolumeCm3 / crossSectionMm2
+    }
+
+    public var formattedEstimatedFilamentLength: String {
+        let meters = estimatedFilamentLengthMeters
+        guard meters > 0 else { return "—" }
+        if meters < 10.0 {
+            return String(format: "~%.2f m", meters)
+        }
+        return String(format: "~%.1f m", meters)
     }
 
     public var fileExistsOnDisk: Bool {

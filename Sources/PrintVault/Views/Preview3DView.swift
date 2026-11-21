@@ -313,7 +313,7 @@ struct ExpandedPreview3DSheet: View {
                             Text("• \(item.triangleCount.formatted()) triangles")
                         }
                         if item.estimatedVolumeCm3 > 0 {
-                            Text(String(format: "• %.1f cm³ (~%.1f g PLA)", item.estimatedVolumeCm3, item.estimatedPLAWeightGrams))
+                            Text(String(format: "• %.1f cm³ (~%.1f g / %@)", item.estimatedVolumeCm3, item.estimatedPLAWeightGrams, item.formattedEstimatedFilamentLength))
                         }
                     }
                     .font(.caption)

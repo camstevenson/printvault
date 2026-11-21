@@ -313,4 +313,30 @@ struct PrintVaultTests {
         #expect(logContents.contains("PRE:Test_Bracket"))
         #expect(logContents.contains("POST:TestCLISlicer"))
     }
+
+    // MARK: - Filament Weight & 1.75mm Length Estimation
+
+    @Test("Filament estimator computes consistent weight and 1.75mm length in meters")
+    @MainActor
+    func filamentLengthEstimation() {
+        let cube = PrintFileItem(
+            filePath: "/tmp/cube.stl",
+            fileName: "cube.stl",
+            fileExtension: "stl",
+            fileSize: 684,
+            dateModified: Date(),
+            discoverySource: .manual
+        )
+        // 20mm cube = 8.0 cm³ mesh volume -> 2.8 cm³ effective plastic -> ~3.47 g PLA, ~1.164 m of 1.75mm filament
+        cube.estimatedVolumeCm3 = 8.0
+        #expect(abs(cube.estimatedPLAWeightGrams - 3.472) < 0.01)
+        #expect(abs(cube.estimatedFilamentLengthMeters - 1.164) < 0.01)
+        #expect(cube.formattedEstimatedFilamentLength == "~1.16 m")
+
+        // Large model (~1000 g of PLA = ~806.45 cm³ effective -> ~335.3 m of 1.75mm filament)
+        cube.estimatedVolumeCm3 = 806.45 / 0.35
+        #expect(abs(cube.estimatedPLAWeightGrams - 1000.0) < 0.5)
+        #expect(abs(cube.estimatedFilamentLengthMeters - 335.28) < 0.5)
+        #expect(cube.formattedEstimatedFilamentLength == "~335.3 m")
+    }
 }
