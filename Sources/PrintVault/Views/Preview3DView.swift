@@ -1,6 +1,7 @@
 import SwiftUI
 import SceneKit
 import AppKit
+import simd
 
 // MARK: - Camera View Preset
 
@@ -349,6 +350,181 @@ struct ExpandedPreview3DSheet: View {
     }
 }
 
+// MARK: - Custom Slicer-Style Orbit / Pan / Zoom SCNView
+
+private final class OrbitPanZoomSCNView: SCNView {
+    private var orbitTarget = SIMD3<Float>(0, 0, 0)
+    private var yaw: Float = 0.72          // radians around Y axis
+    private var pitch: Float = 0.52        // radians above XZ plane
+    private var distance: Float = 100.0
+    private var modelSpan: Float = 50.0
+
+    private var lastDragPoint: NSPoint?
+
+    func configureCamera(for node: SCNNode, preset: CameraViewPreset) {
+        let (minB, maxB) = node.boundingBox
+        let dx = Float(maxB.x - minB.x)
+        let dy = Float(maxB.y - minB.y)
+        let dz = Float(maxB.z - minB.z)
+        let span = max(max(dx, dy), max(dz, 10.0))
+        let midY = Float(minB.y + maxB.y) * 0.5
+
+        modelSpan = span
+        orbitTarget = SIMD3<Float>(0, midY * 0.85, 0)
+        distance = span * 2.2
+
+        switch preset {
+        case .isometric:
+            yaw = 0.72
+            pitch = 0.50
+        case .front:
+            yaw = 0.0
+            pitch = 0.08
+        case .top:
+            yaw = 0.0
+            pitch = (.pi / 2) - 0.03
+        case .side:
+            yaw = .pi / 2
+            pitch = 0.08
+        }
+
+        applyCameraTransform()
+    }
+
+    private func applyCameraTransform() {
+        guard let cameraNode = pointOfView else { return }
+
+        let minDist = max(modelSpan * 0.15, 2.0)
+        let maxDist = max(modelSpan * 15.0, 200.0)
+        distance = min(max(distance, minDist), maxDist)
+        pitch = min(max(pitch, -(.pi / 2) + 0.03), (.pi / 2) - 0.03)
+
+        let cosPitch = cos(pitch)
+        let offset = SIMD3<Float>(
+            distance * cosPitch * sin(yaw),
+            distance * sin(pitch),
+            distance * cosPitch * cos(yaw)
+        )
+        let camPos = orbitTarget + offset
+
+        cameraNode.camera?.zNear = Double(max(0.05, distance * 0.005))
+        cameraNode.camera?.zFar = Double(max(modelSpan * 30.0, distance * 12.0))
+        cameraNode.position = SCNVector3(CGFloat(camPos.x), CGFloat(camPos.y), CGFloat(camPos.z))
+        cameraNode.look(at: SCNVector3(CGFloat(orbitTarget.x), CGFloat(orbitTarget.y), CGFloat(orbitTarget.z)))
+    }
+
+    // MARK: Left-Click Drag -> Orbit
+
+    override func mouseDown(with event: NSEvent) {
+        lastDragPoint = convert(event.locationInWindow, from: nil)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        let current = convert(event.locationInWindow, from: nil)
+        guard let prev = lastDragPoint else {
+            lastDragPoint = current
+            return
+        }
+        let dx = Float(current.x - prev.x)
+        let dy = Float(current.y - prev.y)
+        lastDragPoint = current
+
+        if event.modifierFlags.contains(.option) {
+            panModel(dx: dx, dy: dy)
+        } else {
+            let sensitivity: Float = 0.0085
+            yaw -= dx * sensitivity
+            pitch -= dy * sensitivity
+            applyCameraTransform()
+        }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        lastDragPoint = nil
+    }
+
+    // MARK: Right-Click Drag (or Middle-Click Drag) -> Pan / Move Model
+
+    override func rightMouseDown(with event: NSEvent) {
+        lastDragPoint = convert(event.locationInWindow, from: nil)
+    }
+
+    override func rightMouseDragged(with event: NSEvent) {
+        let current = convert(event.locationInWindow, from: nil)
+        guard let prev = lastDragPoint else {
+            lastDragPoint = current
+            return
+        }
+        let dx = Float(current.x - prev.x)
+        let dy = Float(current.y - prev.y)
+        lastDragPoint = current
+        panModel(dx: dx, dy: dy)
+    }
+
+    override func rightMouseUp(with event: NSEvent) {
+        lastDragPoint = nil
+    }
+
+    override func otherMouseDown(with event: NSEvent) {
+        lastDragPoint = convert(event.locationInWindow, from: nil)
+    }
+
+    override func otherMouseDragged(with event: NSEvent) {
+        let current = convert(event.locationInWindow, from: nil)
+        guard let prev = lastDragPoint else {
+            lastDragPoint = current
+            return
+        }
+        let dx = Float(current.x - prev.x)
+        let dy = Float(current.y - prev.y)
+        lastDragPoint = current
+        panModel(dx: dx, dy: dy)
+    }
+
+    override func otherMouseUp(with event: NSEvent) {
+        lastDragPoint = nil
+    }
+
+    private func panModel(dx: Float, dy: Float) {
+        guard let cameraNode = pointOfView else { return }
+
+        // Compute world units per point at the orbit target plane so the model tracks 1:1 under the cursor
+        let fovDeg = Float(cameraNode.camera?.fieldOfView ?? 40.0)
+        let fovRad = fovDeg * .pi / 180.0
+        let viewHeight = max(Float(bounds.height), 1.0)
+        let worldHeightAtTarget = 2.0 * distance * tan(fovRad * 0.5)
+        let unitsPerPoint = worldHeightAtTarget / viewHeight
+
+        let camTransform = cameraNode.simdTransform
+        let right = simd_normalize(SIMD3<Float>(camTransform.columns.0.x, camTransform.columns.0.y, camTransform.columns.0.z))
+        let up = simd_normalize(SIMD3<Float>(camTransform.columns.1.x, camTransform.columns.1.y, camTransform.columns.1.z))
+
+        // Dragging right/up moves the model right/up on screen by shifting the orbit pivot in the opposite direction
+        orbitTarget -= right * (dx * unitsPerPoint)
+        orbitTarget -= up * (dy * unitsPerPoint)
+        applyCameraTransform()
+    }
+
+    // MARK: Scroll Wheel & Pinch -> Zoom In / Out
+
+    override func scrollWheel(with event: NSEvent) {
+        let rawDelta = Float(event.scrollingDeltaY)
+        guard abs(rawDelta) > 0.0001 else { return }
+
+        let scaleFactor: Float = event.hasPreciseScrollingDeltas ? 0.008 : 0.08
+        let zoomDelta = rawDelta * scaleFactor
+        distance *= exp(-zoomDelta)
+        applyCameraTransform()
+    }
+
+    override func magnify(with event: NSEvent) {
+        let mag = Float(event.magnification)
+        let factor = max(0.5, min(2.0, 1.0 + mag))
+        distance /= factor
+        applyCameraTransform()
+    }
+}
+
 // MARK: - SceneKit NSViewRepresentable
 
 private struct SceneKitViewportRepresentable: NSViewRepresentable {
@@ -376,9 +552,9 @@ private struct SceneKitViewportRepresentable: NSViewRepresentable {
         Coordinator()
     }
 
-    func makeNSView(context: Context) -> SCNView {
-        let scnView = SCNView()
-        scnView.allowsCameraControl = true
+    func makeNSView(context: Context) -> OrbitPanZoomSCNView {
+        let scnView = OrbitPanZoomSCNView()
+        scnView.allowsCameraControl = false
         scnView.autoenablesDefaultLighting = false
         scnView.antialiasingMode = .multisampling4X
         scnView.backgroundColor = NSColor(calibratedRed: 0.11, green: 0.12, blue: 0.15, alpha: 1.0)
@@ -431,7 +607,7 @@ private struct SceneKitViewportRepresentable: NSViewRepresentable {
         return scnView
     }
 
-    func updateNSView(_ scnView: SCNView, context: Context) {
+    func updateNSView(_ scnView: OrbitPanZoomSCNView, context: Context) {
         guard let scene = scnView.scene else { return }
 
         var meshReplaced = false
@@ -455,13 +631,13 @@ private struct SceneKitViewportRepresentable: NSViewRepresentable {
             scene.rootNode.addChildNode(plate)
             context.coordinator.buildPlateNode = plate
 
-            positionCamera(for: clone, preset: cameraPreset, cameraNode: context.coordinator.cameraNode, in: scnView)
+            scnView.configureCamera(for: clone, preset: cameraPreset)
             context.coordinator.lastResetToken = cameraResetToken
         }
 
         if !meshReplaced && context.coordinator.lastResetToken != cameraResetToken,
            let clone = context.coordinator.currentMeshClone {
-            positionCamera(for: clone, preset: cameraPreset, cameraNode: context.coordinator.cameraNode, in: scnView)
+            scnView.configureCamera(for: clone, preset: cameraPreset)
             context.coordinator.lastResetToken = cameraResetToken
         }
 
@@ -492,43 +668,6 @@ private struct SceneKitViewportRepresentable: NSViewRepresentable {
             scnView.debugOptions = showWireframe ? [.showWireframe] : []
             context.coordinator.lastShowWireframe = showWireframe
         }
-    }
-
-    private func positionCamera(
-        for node: SCNNode,
-        preset: CameraViewPreset,
-        cameraNode: SCNNode?,
-        in scnView: SCNView
-    ) {
-        guard let cameraNode else { return }
-        let (minB, maxB) = node.boundingBox
-        let dx = Float(maxB.x - minB.x)
-        let dy = Float(maxB.y - minB.y)
-        let dz = Float(maxB.z - minB.z)
-        let maxSpan = max(max(dx, dy), max(dz, 10.0))
-        let midY = Float(minB.y + maxB.y) * 0.5
-
-        cameraNode.camera?.zNear = Double(max(0.1, maxSpan * 0.005))
-        cameraNode.camera?.zFar = Double(maxSpan * 25.0)
-
-        let dist = maxSpan * 1.95
-        let targetPos: SCNVector3
-        let lookTarget = SCNVector3(0, CGFloat(midY * 0.85), 0)
-
-        switch preset {
-        case .isometric:
-            targetPos = SCNVector3(CGFloat(dist * 0.8), CGFloat(midY + dist * 0.65), CGFloat(dist * 0.9))
-        case .front:
-            targetPos = SCNVector3(0, CGFloat(midY + dist * 0.12), CGFloat(dist * 1.25))
-        case .top:
-            targetPos = SCNVector3(0, CGFloat(midY + dist * 1.45), CGFloat(maxSpan * 0.05))
-        case .side:
-            targetPos = SCNVector3(CGFloat(dist * 1.25), CGFloat(midY + dist * 0.12), 0)
-        }
-
-        cameraNode.position = targetPos
-        cameraNode.look(at: lookTarget)
-        scnView.pointOfView = cameraNode
     }
 
     private func applyMaterial(preset: FilamentMaterialPreset, to node: SCNNode) {
