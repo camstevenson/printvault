@@ -14,6 +14,7 @@ public struct MeshMetadata: Sendable, Equatable {
     public let dimensionY: Double
     public let dimensionZ: Double
     public let volumeCm3: Double
+    public let surfaceAreaCm2: Double
     public let subModelCount: Int
 
     public init(
@@ -23,6 +24,7 @@ public struct MeshMetadata: Sendable, Equatable {
         dimensionY: Double,
         dimensionZ: Double,
         volumeCm3: Double,
+        surfaceAreaCm2: Double = 0,
         subModelCount: Int
     ) {
         self.vertexCount = vertexCount
@@ -31,6 +33,7 @@ public struct MeshMetadata: Sendable, Equatable {
         self.dimensionY = dimensionY
         self.dimensionZ = dimensionZ
         self.volumeCm3 = volumeCm3
+        self.surfaceAreaCm2 = surfaceAreaCm2
         self.subModelCount = subModelCount
     }
 }
@@ -154,7 +157,6 @@ public enum MeshLoaderService {
 
         var minBounds = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
         var maxBounds = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
-        var signedVolume: Double = 0
 
         data.withUnsafeBytes { raw in
             var offset = 84
@@ -194,15 +196,6 @@ public enum MeshLoaderService {
                 minBounds = simd_min(minBounds, simd_min(v1, simd_min(v2, v3)))
                 maxBounds = simd_max(maxBounds, simd_max(v1, simd_max(v2, v3)))
 
-                // Signed tetrahedron volume (in mm^3)
-                let v321 = Double(v3.x) * Double(v2.y) * Double(v1.z)
-                let v231 = Double(v2.x) * Double(v3.y) * Double(v1.z)
-                let v312 = Double(v3.x) * Double(v1.y) * Double(v2.z)
-                let v132 = Double(v1.x) * Double(v3.y) * Double(v2.z)
-                let v213 = Double(v2.x) * Double(v1.y) * Double(v3.z)
-                let v123 = Double(v1.x) * Double(v2.y) * Double(v3.z)
-                signedVolume += (-v321 + v231 + v312 - v132 - v213 + v123) / 6.0
-
                 positions.append(v1)
                 positions.append(v2)
                 positions.append(v3)
@@ -219,6 +212,12 @@ public enum MeshLoaderService {
             }
         }
 
+        let (volumeMm3, areaMm2) = computeVolumeAndSurfaceArea(
+            positions: positions,
+            minBounds: minBounds,
+            maxBounds: maxBounds
+        )
+
         return buildSceneFromArrays(
             positions: positions,
             normals: normals,
@@ -226,7 +225,8 @@ public enum MeshLoaderService {
             reportedVertexCount: positions.count,
             minBounds: minBounds,
             maxBounds: maxBounds,
-            volumeMm3: abs(signedVolume),
+            volumeMm3: volumeMm3,
+            surfaceAreaMm2: areaMm2,
             subModelCount: 1,
             thumbnail: nil
         )
@@ -242,7 +242,6 @@ public enum MeshLoaderService {
         var indices = [Int32]()
         var minBounds = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
         var maxBounds = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
-        var signedVolume: Double = 0
 
         var currentVerts = [SIMD3<Float>]()
         currentVerts.reserveCapacity(3)
@@ -267,9 +266,6 @@ public enum MeshLoaderService {
                         minBounds = simd_min(minBounds, simd_min(v1, simd_min(v2, v3)))
                         maxBounds = simd_max(maxBounds, simd_max(v1, simd_max(v2, v3)))
 
-                        let crossProd = simd_cross(v1, v2)
-                        signedVolume += Double(simd_dot(crossProd, v3)) / 6.0
-
                         let baseIdx = Int32(positions.count)
                         positions.append(v1)
                         positions.append(v2)
@@ -288,6 +284,12 @@ public enum MeshLoaderService {
 
         guard !positions.isEmpty else { return nil }
 
+        let (volumeMm3, areaMm2) = computeVolumeAndSurfaceArea(
+            positions: positions,
+            minBounds: minBounds,
+            maxBounds: maxBounds
+        )
+
         return buildSceneFromArrays(
             positions: positions,
             normals: normals,
@@ -295,7 +297,8 @@ public enum MeshLoaderService {
             reportedVertexCount: positions.count,
             minBounds: minBounds,
             maxBounds: maxBounds,
-            volumeMm3: abs(signedVolume),
+            volumeMm3: volumeMm3,
+            surfaceAreaMm2: areaMm2,
             subModelCount: 1,
             thumbnail: nil
         )
@@ -328,7 +331,6 @@ public enum MeshLoaderService {
         var totalUniqueVerts = 0
         var minBounds = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
         var maxBounds = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
-        var signedVolume: Double = 0
         var emittedMeshCount = 0
 
         func emitMesh(_ mesh: ThreeMFMesh, transform: simd_float4x4, unitScale: Float) {
@@ -360,9 +362,6 @@ public enum MeshLoaderService {
 
                 minBounds = simd_min(minBounds, simd_min(v1, simd_min(v2, v3)))
                 maxBounds = simd_max(maxBounds, simd_max(v1, simd_max(v2, v3)))
-
-                let crossProd = simd_cross(v1, v2)
-                signedVolume += Double(simd_dot(crossProd, v3)) / 6.0
 
                 let baseIdx = Int32(allPositions.count)
                 allPositions.append(v1)
@@ -424,6 +423,12 @@ public enum MeshLoaderService {
             ])
         }
 
+        let (volumeMm3, areaMm2) = computeVolumeAndSurfaceArea(
+            positions: allPositions,
+            minBounds: minBounds,
+            maxBounds: maxBounds
+        )
+
         return buildSceneFromArrays(
             positions: allPositions,
             normals: allNormals,
@@ -431,7 +436,8 @@ public enum MeshLoaderService {
             reportedVertexCount: totalUniqueVerts > 0 ? totalUniqueVerts : allPositions.count,
             minBounds: minBounds,
             maxBounds: maxBounds,
-            volumeMm3: abs(signedVolume),
+            volumeMm3: volumeMm3,
+            surfaceAreaMm2: areaMm2,
             subModelCount: max(emittedMeshCount, 1),
             thumbnail: thumb
         )
@@ -514,6 +520,129 @@ public enum MeshLoaderService {
         return LoadedMeshScene(rootNode: wrapper, metadata: meta, embeddedThumbnail: nil)
     }
 
+    // MARK: - Accurate Volume (Per-Component) & Surface Area Computation
+
+    private struct QuantizedVertex: Hashable {
+        let x: Int64
+        let y: Int64
+        let z: Int64
+
+        init(_ p: SIMD3<Float>) {
+            // 0.01 mm quantization merges shared triangle vertices cleanly across STL floats
+            self.x = Int64((Double(p.x) * 100.0).rounded())
+            self.y = Int64((Double(p.y) * 100.0).rounded())
+            self.z = Int64((Double(p.z) * 100.0).rounded())
+        }
+    }
+
+    /// Computes exact surface area (mm²) and positive volume (mm³), shifting around the mesh centroid for numerical stability
+    /// and summing `abs(volume)` per connected shell so mirrored/inverted sub-parts never cancel each other out.
+    private static func computeVolumeAndSurfaceArea(
+        positions: [SIMD3<Float>],
+        minBounds: SIMD3<Float>,
+        maxBounds: SIMD3<Float>
+    ) -> (volumeMm3: Double, surfaceAreaMm2: Double) {
+        let triCount = positions.count / 3
+        guard triCount > 0 else { return (0, 0) }
+
+        let cx = Double(minBounds.x + maxBounds.x) * 0.5
+        let cy = Double(minBounds.y + maxBounds.y) * 0.5
+        let cz = Double(minBounds.z + maxBounds.z) * 0.5
+
+        var totalAreaMm2: Double = 0
+
+        // For massive meshes (> 250k triangles), use centroid-shifted global volume to stay fast
+        if triCount > 250_000 {
+            var signedVol: Double = 0
+            for t in 0..<triCount {
+                let p1 = positions[t * 3]
+                let p2 = positions[t * 3 + 1]
+                let p3 = positions[t * 3 + 2]
+
+                let a = SIMD3<Double>(Double(p1.x) - cx, Double(p1.y) - cy, Double(p1.z) - cz)
+                let b = SIMD3<Double>(Double(p2.x) - cx, Double(p2.y) - cy, Double(p2.z) - cz)
+                let c = SIMD3<Double>(Double(p3.x) - cx, Double(p3.y) - cy, Double(p3.z) - cz)
+
+                let crossEdge = simd_cross(b - a, c - a)
+                totalAreaMm2 += 0.5 * simd_length(crossEdge)
+                signedVol += simd_dot(a, simd_cross(b, c)) / 6.0
+            }
+            return (abs(signedVol), totalAreaMm2)
+        }
+
+        // Connected-component union-find over shared quantized vertices
+        var parent: [Int] = []
+        parent.reserveCapacity(min(triCount * 2, 128_000))
+        var vertexToNode: [QuantizedVertex: Int] = [:]
+        vertexToNode.reserveCapacity(min(triCount * 2, 128_000))
+
+        func find(_ x: Int) -> Int {
+            var root = x
+            while parent[root] != root {
+                root = parent[root]
+            }
+            var cur = x
+            while parent[cur] != root {
+                let next = parent[cur]
+                parent[cur] = root
+                cur = next
+            }
+            return root
+        }
+
+        func union(_ a: Int, _ b: Int) {
+            let ra = find(a)
+            let rb = find(b)
+            if ra != rb {
+                parent[rb] = ra
+            }
+        }
+
+        func nodeIndex(for p: SIMD3<Float>) -> Int {
+            let key = QuantizedVertex(p)
+            if let existing = vertexToNode[key] {
+                return existing
+            }
+            let idx = parent.count
+            parent.append(idx)
+            vertexToNode[key] = idx
+            return idx
+        }
+
+        var triFirstNode = [Int](repeating: 0, count: triCount)
+        var triSignedVol = [Double](repeating: 0, count: triCount)
+
+        for t in 0..<triCount {
+            let p1 = positions[t * 3]
+            let p2 = positions[t * 3 + 1]
+            let p3 = positions[t * 3 + 2]
+
+            let n1 = nodeIndex(for: p1)
+            let n2 = nodeIndex(for: p2)
+            let n3 = nodeIndex(for: p3)
+            union(n1, n2)
+            union(n1, n3)
+            triFirstNode[t] = n1
+
+            let a = SIMD3<Double>(Double(p1.x) - cx, Double(p1.y) - cy, Double(p1.z) - cz)
+            let b = SIMD3<Double>(Double(p2.x) - cx, Double(p2.y) - cy, Double(p2.z) - cz)
+            let c = SIMD3<Double>(Double(p3.x) - cx, Double(p3.y) - cy, Double(p3.z) - cz)
+
+            let crossEdge = simd_cross(b - a, c - a)
+            totalAreaMm2 += 0.5 * simd_length(crossEdge)
+            triSignedVol[t] = simd_dot(a, simd_cross(b, c)) / 6.0
+        }
+
+        var componentVolumes: [Int: Double] = [:]
+        for t in 0..<triCount {
+            let root = find(triFirstNode[t])
+            componentVolumes[root, default: 0] += triSignedVol[t]
+        }
+
+        let totalVolMm3 = componentVolumes.values.reduce(0.0) { $0 + abs($1) }
+        return (totalVolMm3, totalAreaMm2)
+    }
+
     // MARK: - Scene Builder Helper
 
     private static func buildSceneFromArrays(
@@ -524,6 +653,7 @@ public enum MeshLoaderService {
         minBounds: SIMD3<Float>,
         maxBounds: SIMD3<Float>,
         volumeMm3: Double,
+        surfaceAreaMm2: Double,
         subModelCount: Int,
         thumbnail: NSImage?
     ) -> LoadedMeshScene {
@@ -574,6 +704,7 @@ public enum MeshLoaderService {
         let dy = Double(max(0, maxBounds.y - minBounds.y))
         let dz = Double(max(0, maxBounds.z - minBounds.z))
         let volCm3 = max(0.01, volumeMm3 / 1000.0)
+        let areaCm2 = max(0.0, surfaceAreaMm2 / 100.0)
 
         let metadata = MeshMetadata(
             vertexCount: reportedVertexCount,
@@ -582,6 +713,7 @@ public enum MeshLoaderService {
             dimensionY: dy,
             dimensionZ: dz,
             volumeCm3: volCm3,
+            surfaceAreaCm2: areaCm2,
             subModelCount: subModelCount
         )
 

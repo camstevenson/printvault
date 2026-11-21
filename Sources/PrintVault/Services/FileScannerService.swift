@@ -360,7 +360,7 @@ public final class FileScannerService {
     public func analyzeUnprocessedMeshes(context: ModelContext) async {
         guard !isAnalyzingMeshes else { return }
         let descriptor = FetchDescriptor<PrintFileItem>(
-            predicate: #Predicate { $0.meshAnalyzed == false }
+            predicate: #Predicate { $0.meshAnalyzed == false || $0.surfaceAreaCm2 == 0 }
         )
         guard let pending = try? context.fetch(descriptor), !pending.isEmpty else { return }
 
@@ -397,6 +397,7 @@ public final class FileScannerService {
                     item.dimensionY = meta.dimensionY
                     item.dimensionZ = meta.dimensionZ
                     item.estimatedVolumeCm3 = meta.volumeCm3
+                    item.surfaceAreaCm2 = meta.surfaceAreaCm2
                     item.embeddedSubModelCount = meta.subModelCount
                 }
                 item.meshAnalyzed = true

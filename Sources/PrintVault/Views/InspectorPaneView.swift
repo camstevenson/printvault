@@ -9,6 +9,7 @@ struct InspectorPaneView: View {
     @Bindable var slicerService: SlicerService
     let onOpenSlicerSettings: () -> Void
 
+    @AppStorage("PrintVault.EstimatedInfillPercent") private var estimatedInfillPercent: Double = 20.0
     @State private var newTagText: String = ""
     @State private var slicerFeedbackBanner: String?
     @State private var showExpandedPreview: Bool = false
@@ -183,8 +184,27 @@ struct InspectorPaneView: View {
 
                     // 3D Geometry & Filament Estimates
                     VStack(alignment: .leading, spacing: 8) {
-                        Label("3D Geometry & Print Metrics", systemImage: "cube.transparent")
-                            .font(.subheadline.weight(.semibold))
+                        HStack {
+                            Label("3D Geometry & Print Metrics", systemImage: "cube.transparent")
+                                .font(.subheadline.weight(.semibold))
+                            Spacer()
+                            Picker("Infill", selection: $estimatedInfillPercent) {
+                                Text("15% infill").tag(15.0)
+                                Text("20% infill").tag(20.0)
+                                Text("35% infill").tag(35.0)
+                                Text("50% infill").tag(50.0)
+                                Text("100% solid").tag(100.0)
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.menu)
+                            .controlSize(.mini)
+                            .fixedSize()
+                            .help("Interior infill % used with 1.0 mm outer walls for filament estimates (excludes slicer supports & brims)")
+                        }
+
+                        let effectiveFillPct = Int((item.estimatedEffectiveFillFraction(infillPercent: estimatedInfillPercent) * 100.0).rounded())
+                        let weightGrams = item.estimatedPLAWeightGrams(infillPercent: estimatedInfillPercent)
+                        let filamentLengthText = item.formattedEstimatedFilamentLength(infillPercent: estimatedInfillPercent)
 
                         Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 6) {
                             GridRow {
@@ -218,19 +238,21 @@ struct InspectorPaneView: View {
                                     .font(.caption.monospacedDigit())
                             }
                             GridRow {
-                                Text("Est. PLA (~35%)")
+                                Text(effectiveFillPct > 0 ? "Est. PLA (~\(effectiveFillPct)% fill)" : "Est. PLA")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
-                                Text(item.estimatedPLAWeightGrams > 0 ? String(format: "~%.1f g", item.estimatedPLAWeightGrams) : "—")
+                                Text(weightGrams > 0 ? String(format: "~%.1f g", weightGrams) : "—")
                                     .font(.caption.monospacedDigit())
                             }
+                            .help("Shell + infill geometry estimate (1.0 mm walls, \(Int(estimatedInfillPercent))% infill, 1.24 g/cm³ PLA). Excludes slicer supports, brims, and rafts.")
                             GridRow {
                                 Text("Est. Filament (1.75mm)")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
-                                Text(item.formattedEstimatedFilamentLength)
+                                Text(filamentLengthText)
                                     .font(.caption.monospacedDigit())
                             }
+                            .help("Estimated 1.75 mm filament length before slicer supports, brims, or purge lines.")
                             GridRow {
                                 Text("File Size")
                                     .font(.caption)

@@ -173,6 +173,7 @@ struct Preview3DView: View {
                     }
                     .menuStyle(.borderlessButton)
                     .menuIndicator(.hidden)
+                    .environment(\.colorScheme, .dark)
                     .fixedSize()
                     .help("Camera Angle Preset")
 
@@ -271,14 +272,15 @@ struct Preview3DView: View {
             let result = try await MeshLoaderService.loadMesh(at: item.fileURL)
             guard !Task.isCancelled else { return }
             loadedScene = result
-            // Update SwiftData item metrics if not yet populated
-            if !item.meshAnalyzed || item.triangleCount == 0 {
+            // Update SwiftData item metrics if not yet populated (or upgrading legacy records without surface area)
+            if !item.meshAnalyzed || item.triangleCount == 0 || item.surfaceAreaCm2 == 0 {
                 item.vertexCount = result.metadata.vertexCount
                 item.triangleCount = result.metadata.triangleCount
                 item.dimensionX = result.metadata.dimensionX
                 item.dimensionY = result.metadata.dimensionY
                 item.dimensionZ = result.metadata.dimensionZ
                 item.estimatedVolumeCm3 = result.metadata.volumeCm3
+                item.surfaceAreaCm2 = result.metadata.surfaceAreaCm2
                 item.embeddedSubModelCount = result.metadata.subModelCount
                 item.meshAnalyzed = true
             }

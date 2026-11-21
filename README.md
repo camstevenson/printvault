@@ -28,7 +28,7 @@ Built with **Swift 6**, **SwiftUI**, **SwiftData**, **SceneKit**, and **Metal**,
   - **Right-click drag** *(or middle-click / `⌥` + left-drag)*: Move / pan the model 1:1 with the cursor
   - **Scroll wheel / two-finger scroll / pinch:** Smooth zoom in and out
 - **Viewport Tools** — Switch filament material presets, toggle wireframe mode, toggle the build-plate grid, enable turntable auto-rotation, jump to `Iso` / `Front` / `Top` / `Side` camera presets, or open the **Expanded 3D Preview** (`⇧⌘P`, double-clicking a grid card, or right-clicking a table row).
-- **Geometry & Filament Estimates** — Inspect bounding box dimensions (`mm`), triangle count, mesh volume (`cm³`), estimated PLA weight (`g`, assuming ~35% effective infill + walls), and estimated **1.75 mm filament length (`m`)**.
+- **Geometry & Filament Estimates** — Inspect bounding box dimensions (`mm`), triangle count, per-component mesh volume (`cm³`), estimated PLA weight (`g`, using a surface-area shell + selectable infill model), and estimated **1.75 mm filament length (`m`)**.
 - **Fast Thumbnail Pipeline** — Background Metal offscreen snapshots with off-main-thread ImageIO downsampling, cancellation-aware scrolling, disk caching, and a toggle between embedded `.3mf` previews and uniform 3D studio renders.
 
 ### Slicer Integrations & Automation Hooks
@@ -132,6 +132,7 @@ PrintVault/
 │   │   ├── FinderTagService.swift                # macOS Finder tag read/write sync
 │   │   ├── MeshLoaderService.swift               # Native binary/ASCII STL & 3MF parsers
 │   │   ├── SampleMeshGenerator.swift             # Procedural sample .stl & .3mf generator
+│   │   ├── SingleInstanceGuard.swift             # Single-instance POSIX lock & window focus
 │   │   ├── SlicerService.swift                   # Slicer detection & extensible hook pipeline
 │   │   └── ThumbnailService.swift                # Off-main-thread Metal renderer & disk cache
 │   └── Views/

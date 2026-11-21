@@ -15,6 +15,7 @@
 		4FF2AD5C58FFDC96A7F5FC91 /* PrintVaultApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF7403208CB6A5511BF0E496 /* PrintVaultApp.swift */; };
 		910A21828FCD54A1497B35DE /* Preview3DView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CEE8693706AA8E68D264FFCA /* Preview3DView.swift */; };
 		A33BE3FDD1FEC693F0839A77 /* MeshLoaderService.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4694B5CA2099C7CF8FFBB70 /* MeshLoaderService.swift */; };
+		BB4A25B94C9F70AF9D492040 /* SingleInstanceGuard.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2E42803C8A9911FB29584A2 /* SingleInstanceGuard.swift */; };
 		C87A49778298A15BE2A79794 /* SampleMeshGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4F17F3ACB5D4F84AF57D6AC /* SampleMeshGenerator.swift */; };
 		C9BC0050CACE8AAD2C9E4386 /* FinderTagService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1724A5892F8AAF5358EC3C2D /* FinderTagService.swift */; };
 		DF5E5EFF1010477C8CDB0F8E /* PrintModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 592852C88B23DBD828525BFE /* PrintModels.swift */; };
@@ -49,6 +50,7 @@
 		DD74AE747DFFA76BC68DA8D6 /* ThumbnailService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThumbnailService.swift; sourceTree = "<group>"; };
 		DF7403208CB6A5511BF0E496 /* PrintVaultApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrintVaultApp.swift; sourceTree = "<group>"; };
 		E4694B5CA2099C7CF8FFBB70 /* MeshLoaderService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeshLoaderService.swift; sourceTree = "<group>"; };
+		F2E42803C8A9911FB29584A2 /* SingleInstanceGuard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SingleInstanceGuard.swift; sourceTree = "<group>"; };
 		F4F17F3ACB5D4F84AF57D6AC /* SampleMeshGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleMeshGenerator.swift; sourceTree = "<group>"; };
 		F64B7F020685B89C219EECC2 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		FF35370F28C44B7B5F4F18F6 /* PrintVaultTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PrintVaultTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -122,6 +124,7 @@
 				1724A5892F8AAF5358EC3C2D /* FinderTagService.swift */,
 				E4694B5CA2099C7CF8FFBB70 /* MeshLoaderService.swift */,
 				F4F17F3ACB5D4F84AF57D6AC /* SampleMeshGenerator.swift */,
+				F2E42803C8A9911FB29584A2 /* SingleInstanceGuard.swift */,
 				C7A10ED1CCCA650CDD5847B9 /* SlicerService.swift */,
 				DD74AE747DFFA76BC68DA8D6 /* ThumbnailService.swift */,
 			);
@@ -227,6 +230,7 @@
 				DF5E5EFF1010477C8CDB0F8E /* PrintModels.swift in Sources */,
 				4FF2AD5C58FFDC96A7F5FC91 /* PrintVaultApp.swift in Sources */,
 				C87A49778298A15BE2A79794 /* SampleMeshGenerator.swift in Sources */,
+				BB4A25B94C9F70AF9D492040 /* SingleInstanceGuard.swift in Sources */,
 				F9492E051030956416C6DD0E /* SlicerService.swift in Sources */,
 				1E3E065F4391ED9CFB3BA5A4 /* SlicerSettingsView.swift in Sources */,
 				F30716722C6949DBF72525E1 /* ThumbnailService.swift in Sources */,

@@ -4,7 +4,16 @@ import AppKit
 
 @main
 struct PrintVaultApp: App {
-    let sharedModelContainer: ModelContainer = {
+    let sharedModelContainer: ModelContainer
+
+    init() {
+        // Enforce single running instance BEFORE opening SwiftData SQLite store
+        SingleInstanceGuard.shared.enforceSingleInstanceOrTerminate()
+        self.sharedModelContainer = Self.makeModelContainer()
+        NSApplication.shared.setActivationPolicy(.regular)
+    }
+
+    private static func makeModelContainer() -> ModelContainer {
         let schema = Schema([
             PrintFileItem.self,
             PrintCategory.self,
@@ -17,14 +26,10 @@ struct PrintVaultApp: App {
             let fallbackConfig = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
             return try! ModelContainer(for: schema, configurations: [fallbackConfig])
         }
-    }()
-
-    init() {
-        NSApplication.shared.setActivationPolicy(.regular)
     }
 
     var body: some Scene {
-        WindowGroup("PrintVault — 3D Print Library & Slicer Hub") {
+        Window("PrintVault — 3D Print Library & Slicer Hub", id: "main") {
             ContentView()
                 .frame(minWidth: 1080, minHeight: 680)
         }

@@ -45,6 +45,30 @@ struct PrintVaultTests {
         #expect(abs(loaded.metadata.dimensionY - 20.0) < 0.01)
         #expect(abs(loaded.metadata.dimensionZ - 20.0) < 0.01)
         #expect(abs(loaded.metadata.volumeCm3 - 8.0) < 0.05)
+        #expect(abs(loaded.metadata.surfaceAreaCm2 - 24.0) < 0.05)
+    }
+
+    @Test("Per-component volume sums disconnected shells even when one shell has inverted triangle winding")
+    func perComponentInvertedWindingVolume() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let cubeA = SampleMeshGenerator.makeBoxTriangles(
+            min: SIMD3<Float>(0, 0, 0),
+            max: SIMD3<Float>(20, 20, 20)
+        )
+        // Second disconnected cube with inverted winding (simulating a mirrored sub-part)
+        let cubeBInverted = SampleMeshGenerator.makeBoxTriangles(
+            min: SIMD3<Float>(50, 0, 0),
+            max: SIMD3<Float>(70, 20, 20)
+        ).map { ($0.0, $0.2, $0.1) }
+
+        let url = dir.appendingPathComponent("two_cubes_one_mirrored.stl")
+        #expect(SampleMeshGenerator.writeBinarySTL(triangles: cubeA + cubeBInverted, headerText: "Mirrored Sub-Part", to: url))
+
+        let loaded = try await MeshLoaderService.loadMesh(at: url)
+        #expect(abs(loaded.metadata.volumeCm3 - 16.0) < 0.05)
+        #expect(abs(loaded.metadata.surfaceAreaCm2 - 48.0) < 0.05)
     }
 
     // MARK: - ASCII STL Parsing
@@ -316,27 +340,60 @@ struct PrintVaultTests {
 
     // MARK: - Filament Weight & 1.75mm Length Estimation
 
-    @Test("Filament estimator computes consistent weight and 1.75mm length in meters")
+    @Test("Shell + infill filament estimator treats thin-walled models as ~100% solid and thick models as shell + infill")
     @MainActor
     func filamentLengthEstimation() {
-        let cube = PrintFileItem(
-            filePath: "/tmp/cube.stl",
-            fileName: "cube.stl",
+        let item = PrintFileItem(
+            filePath: "/tmp/model.stl",
+            fileName: "model.stl",
             fileExtension: "stl",
             fileSize: 684,
             dateModified: Date(),
             discoverySource: .manual
         )
-        // 20mm cube = 8.0 cm³ mesh volume -> 2.8 cm³ effective plastic -> ~3.47 g PLA, ~1.164 m of 1.75mm filament
-        cube.estimatedVolumeCm3 = 8.0
-        #expect(abs(cube.estimatedPLAWeightGrams - 3.472) < 0.01)
-        #expect(abs(cube.estimatedFilamentLengthMeters - 1.164) < 0.01)
-        #expect(cube.formattedEstimatedFilamentLength == "~1.16 m")
 
-        // Large model (~1000 g of PLA = ~806.45 cm³ effective -> ~335.3 m of 1.75mm filament)
-        cube.estimatedVolumeCm3 = 806.45 / 0.35
-        #expect(abs(cube.estimatedPLAWeightGrams - 1000.0) < 0.5)
-        #expect(abs(cube.estimatedFilamentLengthMeters - 335.28) < 0.5)
-        #expect(cube.formattedEstimatedFilamentLength == "~335.3 m")
+        // 1. 20mm cube: V = 8.0 cm³, S = 24.0 cm² -> shellFraction = 0.27, + 20% infill of remaining 0.73 = 0.416
+        item.estimatedVolumeCm3 = 8.0
+        item.surfaceAreaCm2 = 24.0
+        #expect(abs(item.estimatedEffectiveFillFraction(wallThicknessMm: 1.0, infillPercent: 20.0) - 0.416) < 0.005)
+        #expect(abs(item.estimatedPLAWeightGrams - 4.127) < 0.05)
+        #expect(abs(item.estimatedFilamentLengthMeters - 1.384) < 0.02)
+
+        // 2. Thin-walled fence/plate (2mm thick, 100x20x2mm): V = 4.0 cm³, S = 44.8 cm² -> 100% solid walls
+        item.estimatedVolumeCm3 = 4.0
+        item.surfaceAreaCm2 = 44.8
+        #expect(abs(item.estimatedEffectiveFillFraction(wallThicknessMm: 1.0, infillPercent: 20.0) - 1.0) < 0.001)
+        #expect(abs(item.estimatedPLAWeightGrams - 4.96) < 0.02)
+        #expect(abs(item.estimatedFilamentLengthMeters - 1.663) < 0.01)
+
+        // 3. 100% solid 1 kg spool check (~806.45 cm³ PLA = ~1000 g = ~335.3 m of 1.75mm filament)
+        item.estimatedVolumeCm3 = 806.45
+        item.surfaceAreaCm2 = 500.0
+        #expect(abs(item.estimatedPLAWeightGrams(infillPercent: 100.0) - 1000.0) < 0.5)
+        #expect(abs(item.estimatedFilamentLengthMeters(infillPercent: 100.0) - 335.28) < 0.5)
+        #expect(item.formattedEstimatedFilamentLength(infillPercent: 100.0) == "~335.3 m")
+    }
+
+    // MARK: - Single Instance Guard
+
+    @Test("SingleInstanceGuard prevents a second lock while held and allows re-acquisition after release")
+    @MainActor
+    func singleInstanceLockEnforcement() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let lockURL = dir.appendingPathComponent("instance.lock")
+        let first = SingleInstanceGuard()
+        let second = SingleInstanceGuard()
+
+        #expect(first.tryAcquireLock(at: lockURL) == true)
+        #expect(second.tryAcquireLock(at: lockURL) == false)
+
+        let storedPID = try String(contentsOf: lockURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(storedPID == "\(ProcessInfo.processInfo.processIdentifier)")
+
+        first.releaseLock()
+        #expect(second.tryAcquireLock(at: lockURL) == true)
+        second.releaseLock()
     }
 }

@@ -158,6 +158,7 @@ public final class PrintFileItem {
     public var dimensionY: Double // mm
     public var dimensionZ: Double // mm
     public var estimatedVolumeCm3: Double
+    public var surfaceAreaCm2: Double = 0
     public var embeddedSubModelCount: Int
 
     // Slicer Tracking
@@ -195,6 +196,7 @@ public final class PrintFileItem {
         self.dimensionY = 0
         self.dimensionZ = 0
         self.estimatedVolumeCm3 = 0
+        self.surfaceAreaCm2 = 0
         self.embeddedSubModelCount = 1
         self.lastSentToSlicerDate = nil
         self.lastUsedSlicerName = nil
@@ -240,38 +242,93 @@ public final class PrintFileItem {
         return String(format: "%.1f × %.1f × %.1f mm", dimensionX, dimensionY, dimensionZ)
     }
 
-    /// Effective plastic volume in cm³ assuming ~35% effective density (infill + walls)
-    public var estimatedEffectivePlasticVolumeCm3: Double {
+    /// Effective solid-fill fraction (0...1) using a shell + infill model:
+    /// thin-walled geometry (high surface-area-to-volume ratio) approaches 100% solid walls,
+    /// while thick geometry combines outer walls/top/bottom (`wallThicknessMm`) with interior `infillPercent`.
+    public func estimatedEffectiveFillFraction(
+        wallThicknessMm: Double = 1.0,
+        infillPercent: Double = 20.0
+    ) -> Double {
         guard estimatedVolumeCm3 > 0 else { return 0 }
-        return estimatedVolumeCm3 * 0.35
+        let infill = min(max(infillPercent / 100.0, 0.0), 1.0)
+        guard surfaceAreaCm2 > 0 else {
+            // Fallback for legacy records before surface area is populated
+            return max(infill, 0.35)
+        }
+        let wallThicknessCm = max(wallThicknessMm, 0.0) / 10.0
+        let rawShellRatio = (surfaceAreaCm2 * wallThicknessCm) / estimatedVolumeCm3
+        // Steiner parallel-body correction keeps cubes/cylinders accurate while saturating thin walls (<= 2*wall) at 100%
+        let shellFraction = min(1.0, rawShellRatio * 0.90)
+        return shellFraction + infill * (1.0 - shellFraction)
     }
 
-    /// Rough PLA weight estimate assuming ~35% effective density (infill + walls) and 1.24 g/cm³ PLA density
+    /// Effective plastic volume in cm³ (walls + top/bottom + infill)
+    public func estimatedEffectivePlasticVolumeCm3(
+        wallThicknessMm: Double = 1.0,
+        infillPercent: Double = 20.0
+    ) -> Double {
+        guard estimatedVolumeCm3 > 0 else { return 0 }
+        return estimatedVolumeCm3 * estimatedEffectiveFillFraction(
+            wallThicknessMm: wallThicknessMm,
+            infillPercent: infillPercent
+        )
+    }
+
+    /// Convenience default effective plastic volume (1.0 mm walls + 20% infill)
+    public var estimatedEffectivePlasticVolumeCm3: Double {
+        estimatedEffectivePlasticVolumeCm3(wallThicknessMm: 1.0, infillPercent: 20.0)
+    }
+
+    /// PLA weight estimate (g) using 1.24 g/cm³ PLA density
+    public func estimatedPLAWeightGrams(
+        wallThicknessMm: Double = 1.0,
+        infillPercent: Double = 20.0
+    ) -> Double {
+        estimatedEffectivePlasticVolumeCm3(wallThicknessMm: wallThicknessMm, infillPercent: infillPercent) * 1.24
+    }
+
     public var estimatedPLAWeightGrams: Double {
-        estimatedEffectivePlasticVolumeCm3 * 1.24
+        estimatedPLAWeightGrams(wallThicknessMm: 1.0, infillPercent: 20.0)
     }
 
-    /// Rough filament length estimate in meters for standard 1.75mm diameter filament
+    /// Filament length estimate in meters for standard 1.75mm diameter filament
     public var estimatedFilamentLengthMeters: Double {
-        estimatedFilamentLengthMeters(diameterMm: 1.75)
+        estimatedFilamentLengthMeters(diameterMm: 1.75, wallThicknessMm: 1.0, infillPercent: 20.0)
     }
 
-    /// Rough filament length estimate in meters for a given filament diameter in millimeters
-    public func estimatedFilamentLengthMeters(diameterMm: Double) -> Double {
-        guard estimatedEffectivePlasticVolumeCm3 > 0, diameterMm > 0 else { return 0 }
+    /// Filament length estimate in meters for given filament diameter, wall thickness, and infill
+    public func estimatedFilamentLengthMeters(
+        diameterMm: Double = 1.75,
+        wallThicknessMm: Double = 1.0,
+        infillPercent: Double = 20.0
+    ) -> Double {
+        let volCm3 = estimatedEffectivePlasticVolumeCm3(wallThicknessMm: wallThicknessMm, infillPercent: infillPercent)
+        guard volCm3 > 0, diameterMm > 0 else { return 0 }
         let radiusMm = diameterMm / 2.0
         let crossSectionMm2 = Double.pi * radiusMm * radiusMm
         // 1 cm³ = 1000 mm³, and 1 m = 1000 mm, so cm³ / mm² equals length directly in meters
-        return estimatedEffectivePlasticVolumeCm3 / crossSectionMm2
+        return volCm3 / crossSectionMm2
     }
 
-    public var formattedEstimatedFilamentLength: String {
-        let meters = estimatedFilamentLengthMeters
+    public func formattedEstimatedFilamentLength(
+        diameterMm: Double = 1.75,
+        wallThicknessMm: Double = 1.0,
+        infillPercent: Double = 20.0
+    ) -> String {
+        let meters = estimatedFilamentLengthMeters(
+            diameterMm: diameterMm,
+            wallThicknessMm: wallThicknessMm,
+            infillPercent: infillPercent
+        )
         guard meters > 0 else { return "—" }
         if meters < 10.0 {
             return String(format: "~%.2f m", meters)
         }
         return String(format: "~%.1f m", meters)
+    }
+
+    public var formattedEstimatedFilamentLength: String {
+        formattedEstimatedFilamentLength(diameterMm: 1.75, wallThicknessMm: 1.0, infillPercent: 20.0)
     }
 
     public var fileExistsOnDisk: Bool {
