@@ -352,12 +352,11 @@ struct ExpandedPreview3DSheet: View {
     }
 }
 
-// MARK: - Custom Slicer-Style Orbit / Pan / Zoom SCNView
+// MARK: - Custom Slicer-Style Quaternion Arcball / Pan / Zoom SCNView
 
 private final class OrbitPanZoomSCNView: SCNView {
     private var orbitTarget = SIMD3<Float>(0, 0, 0)
-    private var yaw: Float = 0.72          // radians around Y axis
-    private var pitch: Float = 0.52        // radians above XZ plane
+    private var orientation = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
     private var distance: Float = 100.0
     private var modelSpan: Float = 50.0
 
@@ -369,28 +368,53 @@ private final class OrbitPanZoomSCNView: SCNView {
         let dy = Float(maxB.y - minB.y)
         let dz = Float(maxB.z - minB.z)
         let span = max(max(dx, dy), max(dz, 10.0))
+        let midX = Float(minB.x + maxB.x) * 0.5
         let midY = Float(minB.y + maxB.y) * 0.5
+        let midZ = Float(minB.z + maxB.z) * 0.5
 
         modelSpan = span
-        orbitTarget = SIMD3<Float>(0, midY * 0.85, 0)
-        distance = span * 2.2
+        orbitTarget = SIMD3<Float>(midX, midY * 0.9, midZ)
+        distance = span * 2.15
 
         switch preset {
         case .isometric:
-            yaw = 0.72
-            pitch = 0.50
+            orientation = Self.lookAtQuaternion(
+                from: SIMD3<Float>(0.8, 0.65, 0.9),
+                to: .zero,
+                up: SIMD3<Float>(0, 1, 0)
+            )
         case .front:
-            yaw = 0.0
-            pitch = 0.08
+            orientation = Self.lookAtQuaternion(
+                from: SIMD3<Float>(0, 0.10, 1.0),
+                to: .zero,
+                up: SIMD3<Float>(0, 1, 0)
+            )
         case .top:
-            yaw = 0.0
-            pitch = (.pi / 2) - 0.03
+            orientation = Self.lookAtQuaternion(
+                from: SIMD3<Float>(0, 1.0, 0),
+                to: .zero,
+                up: SIMD3<Float>(0, 0, -1)
+            )
         case .side:
-            yaw = .pi / 2
-            pitch = 0.08
+            orientation = Self.lookAtQuaternion(
+                from: SIMD3<Float>(1.0, 0.10, 0),
+                to: .zero,
+                up: SIMD3<Float>(0, 1, 0)
+            )
         }
 
         applyCameraTransform()
+    }
+
+    private static func lookAtQuaternion(
+        from eye: SIMD3<Float>,
+        to target: SIMD3<Float>,
+        up worldUp: SIMD3<Float>
+    ) -> simd_quatf {
+        let back = simd_normalize(eye - target)
+        let right = simd_normalize(simd_cross(worldUp, back))
+        let trueUp = simd_cross(back, right)
+        return simd_normalize(simd_quatf(simd_float3x3(right, trueUp, back)))
     }
 
     private func applyCameraTransform() {
@@ -399,23 +423,21 @@ private final class OrbitPanZoomSCNView: SCNView {
         let minDist = max(modelSpan * 0.15, 2.0)
         let maxDist = max(modelSpan * 15.0, 200.0)
         distance = min(max(distance, minDist), maxDist)
-        pitch = min(max(pitch, -(.pi / 2) + 0.03), (.pi / 2) - 0.03)
+        orientation = simd_normalize(orientation)
 
-        let cosPitch = cos(pitch)
-        let offset = SIMD3<Float>(
-            distance * cosPitch * sin(yaw),
-            distance * sin(pitch),
-            distance * cosPitch * cos(yaw)
-        )
-        let camPos = orbitTarget + offset
+        let camBack = orientation.act(SIMD3<Float>(0, 0, 1))
+        let camPos = orbitTarget + camBack * distance
 
+        SCNTransaction.begin()
+        SCNTransaction.disableActions = true
         cameraNode.camera?.zNear = Double(max(0.05, distance * 0.005))
         cameraNode.camera?.zFar = Double(max(modelSpan * 30.0, distance * 12.0))
-        cameraNode.position = SCNVector3(CGFloat(camPos.x), CGFloat(camPos.y), CGFloat(camPos.z))
-        cameraNode.look(at: SCNVector3(CGFloat(orbitTarget.x), CGFloat(orbitTarget.y), CGFloat(orbitTarget.z)))
+        cameraNode.simdPosition = camPos
+        cameraNode.simdOrientation = orientation
+        SCNTransaction.commit()
     }
 
-    // MARK: Left-Click Drag -> Orbit
+    // MARK: Left-Click Drag -> Free 360° Arcball Rotation
 
     override func mouseDown(with event: NSEvent) {
         lastDragPoint = convert(event.locationInWindow, from: nil)
@@ -434,15 +456,33 @@ private final class OrbitPanZoomSCNView: SCNView {
         if event.modifierFlags.contains(.option) {
             panModel(dx: dx, dy: dy)
         } else {
-            let sensitivity: Float = 0.0085
-            yaw -= dx * sensitivity
-            pitch -= dy * sensitivity
-            applyCameraTransform()
+            rotateArcball(dx: dx, dy: dy)
         }
     }
 
     override func mouseUp(with event: NSEvent) {
         lastDragPoint = nil
+    }
+
+    private func rotateArcball(dx: Float, dy: Float) {
+        let dragLen = hypot(dx, dy)
+        guard dragLen > 0.0001 else { return }
+
+        let camRight = orientation.act(SIMD3<Float>(1, 0, 0))
+        let camUp = orientation.act(SIMD3<Float>(0, 1, 0))
+        let camBack = orientation.act(SIMD3<Float>(0, 0, 1))
+
+        // Roll the camera opposite to the screen drag vector so the model rotates directly under the cursor from any angle
+        let dragWorld = camRight * dx + camUp * dy
+        let rotAxis = simd_cross(dragWorld, camBack)
+        let axisLen = simd_length(rotAxis)
+        guard axisLen > 1e-6 else { return }
+
+        let refDim = max(min(Float(bounds.width), Float(bounds.height)), 200.0)
+        let angle = (dragLen / refDim) * Float.pi * 1.15
+        let deltaQ = simd_quatf(angle: angle, axis: rotAxis / axisLen)
+        orientation = simd_normalize(deltaQ * orientation)
+        applyCameraTransform()
     }
 
     // MARK: Right-Click Drag (or Middle-Click Drag) -> Pan / Move Model
@@ -490,18 +530,15 @@ private final class OrbitPanZoomSCNView: SCNView {
     private func panModel(dx: Float, dy: Float) {
         guard let cameraNode = pointOfView else { return }
 
-        // Compute world units per point at the orbit target plane so the model tracks 1:1 under the cursor
         let fovDeg = Float(cameraNode.camera?.fieldOfView ?? 40.0)
         let fovRad = fovDeg * .pi / 180.0
         let viewHeight = max(Float(bounds.height), 1.0)
         let worldHeightAtTarget = 2.0 * distance * tan(fovRad * 0.5)
         let unitsPerPoint = worldHeightAtTarget / viewHeight
 
-        let camTransform = cameraNode.simdTransform
-        let right = simd_normalize(SIMD3<Float>(camTransform.columns.0.x, camTransform.columns.0.y, camTransform.columns.0.z))
-        let up = simd_normalize(SIMD3<Float>(camTransform.columns.1.x, camTransform.columns.1.y, camTransform.columns.1.z))
+        let right = orientation.act(SIMD3<Float>(1, 0, 0))
+        let up = orientation.act(SIMD3<Float>(0, 1, 0))
 
-        // Dragging right/up moves the model right/up on screen by shifting the orbit pivot in the opposite direction
         orbitTarget -= right * (dx * unitsPerPoint)
         orbitTarget -= up * (dy * unitsPerPoint)
         applyCameraTransform()
