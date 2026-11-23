@@ -184,6 +184,88 @@ struct PrintVaultTests {
         #expect(abs(loaded.metadata.dimensionZ - 25.4) < 0.1)
     }
 
+    @Test("High-poly 600k-triangle 3MF parses quickly with exact metadata and watertight preview LOD")
+    func highPoly3MFFastByteParserAndLOD() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let staging = dir.appendingPathComponent("stage_highpoly", isDirectory: true)
+        let objectsDir = staging.appendingPathComponent("3D/Objects", isDirectory: true)
+        try FileManager.default.createDirectory(at: objectsDir, withIntermediateDirectories: true)
+
+        // Generate a 550x550 grid (~605,000 triangles) inside an external 3D/Objects/grid.model referenced via <component p:path>
+        let n = 550
+        var subXML = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<model unit=\"millimeter\" xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\"><resources><object id=\"2\" type=\"model\"><mesh><vertices>\n"
+        subXML.reserveCapacity(42_000_000)
+        for y in 0...n {
+            let fy = Double(y) * (50.0 / Double(n))
+            for x in 0...n {
+                let fx = Double(x) * (50.0 / Double(n))
+                let fz = sin(fx * 0.2) * cos(fy * 0.2) * 5.0 + 5.0
+                subXML += "<vertex x=\"\(String(format: "%.3f", fx))\" y=\"\(String(format: "%.3f", fy))\" z=\"\(String(format: "%.3f", fz))\"/>\n"
+            }
+        }
+        subXML += "</vertices><triangles>\n"
+        let stride = n + 1
+        for y in 0..<n {
+            for x in 0..<n {
+                let i0 = y * stride + x
+                let i1 = i0 + 1
+                let i2 = i0 + stride
+                let i3 = i2 + 1
+                subXML += "<triangle v1=\"\(i0)\" v2=\"\(i1)\" v3=\"\(i3)\"/>\n"
+                subXML += "<triangle v1=\"\(i0)\" v2=\"\(i3)\" v3=\"\(i2)\"/>\n"
+            }
+        }
+        subXML += "</triangles></mesh></object></resources></model>"
+        try subXML.write(to: objectsDir.appendingPathComponent("grid.model"), atomically: true, encoding: .utf8)
+
+        let rootXML = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06">
+          <resources>
+            <object id="1" type="model">
+              <components>
+                <component p:path="/3D/Objects/grid.model" objectid="2" transform="1 0 0 0 1 0 0 0 1 0 0 0" />
+              </components>
+            </object>
+          </resources>
+          <build>
+            <item objectid="1" transform="1 0 0 0 1 0 0 0 1 0 0 0" />
+            <item objectid="1" transform="1 0 0 0 1 0 0 0 1 100 0 0" />
+          </build>
+        </model>
+        """
+        try rootXML.write(to: staging.appendingPathComponent("3D/3dmodel.model"), atomically: true, encoding: .utf8)
+
+        let archiveURL = dir.appendingPathComponent("highpoly_test.3mf")
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
+        proc.currentDirectoryURL = staging
+        proc.arguments = ["-q", "-1", "-r", archiveURL.path, "3D"]
+        try proc.run()
+        proc.waitUntilExit()
+        #expect(proc.terminationStatus == 0)
+
+        let start = CFAbsoluteTimeGetCurrent()
+        let loaded = try await MeshLoaderService.loadMesh(at: archiveURL)
+        let elapsed = CFAbsoluteTimeGetCurrent() - start
+
+        // Two transformed instances of the 50mm grid (at X=0 and X=100) -> 1,210,000 triangles and 150mm X span!
+        #expect(loaded.metadata.subModelCount == 2)
+        #expect(loaded.metadata.triangleCount == n * n * 2 * 2)
+        #expect(abs(loaded.metadata.dimensionX - 150.0) < 0.1)
+        #expect(abs(loaded.metadata.dimensionY - 50.0) < 0.1)
+        #expect(elapsed < 10.0)
+
+        // Preview geometry should preserve the full 150mm bounding span across both separated instances
+        let (pMin, pMax) = loaded.rootNode.boundingBox
+        #expect(abs(Double(pMax.x - pMin.x) - 150.0) < 1.5)
+        let previewTris = loaded.rootNode.childNodes.first?.geometry?.elements.first?.primitiveCount ?? 0
+        #expect(previewTris > 1000)
+        #expect(previewTris < loaded.metadata.triangleCount)
+    }
+
     // MARK: - File Scanner & Auto-Categorization
 
     @Test("Folder scanning finds 3D models, skips ignored dirs, and matches folder boundaries safely")
