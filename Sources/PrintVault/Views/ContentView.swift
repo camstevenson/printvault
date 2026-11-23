@@ -68,6 +68,7 @@ struct ContentView: View {
     @State private var viewMode: BrowserViewMode = .grid
     @AppStorage("PrintVault.GroupRelatedModels") private var groupRelatedModels: Bool = true
     @State private var openedGroupID: String?
+    @State private var showInspector: Bool = true
 
     @State private var showSlicerSettings: Bool = false
     @State private var showAICategorizeSheet: Bool = false
@@ -315,16 +316,17 @@ struct ContentView: View {
             .equatable()
             .navigationSplitViewColumnWidth(min: 220, ideal: 245, max: 290)
         } detail: {
-            HSplitView {
-                centerBrowserView(
-                    displayedItems: displayedItems,
-                    browserEntries: browserEntries,
-                    activeOpenedGroup: activeOpenedGroup,
-                    stats: stats,
-                    activeItem: activeItem
-                )
-                    .frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity)
-
+            centerBrowserView(
+                displayedItems: displayedItems,
+                browserEntries: browserEntries,
+                activeOpenedGroup: activeOpenedGroup,
+                stats: stats,
+                activeItem: activeItem
+            )
+            .frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .inspector(isPresented: $showInspector) {
+            Group {
                 if let activeItem {
                     InspectorPaneView(
                         item: activeItem,
@@ -344,12 +346,11 @@ struct ContentView: View {
                             }
                         }
                     )
-                    .frame(minWidth: 320, idealWidth: 355, maxWidth: 420, maxHeight: .infinity)
                 } else {
                     emptyInspectorPlaceholder
-                        .frame(minWidth: 320, idealWidth: 355, maxWidth: 420, maxHeight: .infinity)
                 }
             }
+            .inspectorColumnWidth(min: 320, ideal: 355, max: 420)
         }
         .onChange(of: sidebarFilter) { _, _ in
             openedGroupID = nil
@@ -363,6 +364,7 @@ struct ContentView: View {
         .toolbar {
             toolbarContent
         }
+        .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         .sheet(isPresented: $showSlicerSettings) {
             SlicerSettingsView(slicerService: slicerService)
         }
@@ -1434,6 +1436,14 @@ struct ContentView: View {
                 Label("Slicer Hooks", systemImage: "printer.fill")
             }
             .help("Configure Bambu Studio, OrcaSlicer, PrusaSlicer, Cura, and CLI hooks")
+
+            Button {
+                showInspector.toggle()
+            } label: {
+                Label("Toggle Inspector", systemImage: "sidebar.trailing")
+            }
+            .keyboardShortcut("i", modifiers: [.command, .option])
+            .help("Show or Hide Inspector (⌥⌘I)")
         }
     }
 
