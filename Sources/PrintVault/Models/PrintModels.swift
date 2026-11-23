@@ -88,7 +88,7 @@ public enum DiscoverySource: String, Codable, Sendable {
 // MARK: - PrintCategory (@Model)
 
 @Model
-public final class PrintCategory {
+public final class PrintCategory: Hashable, Identifiable {
     @Attribute(.unique) public var id: UUID
     public var name: String
     public var iconName: String
