@@ -10,6 +10,9 @@ struct InspectorPaneView: View {
     @Bindable var vlmService: VLMCategorizerService
     let onOpenSlicerSettings: () -> Void
     let onOpenAICategorize: () -> Void
+    var containingGroup: ModelGroup? = nil
+    var onSelectSiblingPart: ((PrintFileItem) -> Void)? = nil
+    var onOpenGroup: (() -> Void)? = nil
 
     @AppStorage("PrintVault.EstimatedInfillPercent") private var estimatedInfillPercent: Double = 20.0
     @State private var newTagText: String = ""
@@ -87,6 +90,11 @@ struct InspectorPaneView: View {
                             }
                             .buttonStyle(.plain)
                         }
+                    }
+
+                    if let group = containingGroup, group.items.count > 1 {
+                        Divider()
+                        groupPartsSwitcher(group: group)
                     }
 
                     Divider()
@@ -373,6 +381,81 @@ struct InspectorPaneView: View {
         }
         .onChange(of: item.filePath) { _, _ in
             aiFeedbackText = nil
+        }
+    }
+
+    // MARK: - Multi-Part Group Switcher
+
+    private func groupPartsSwitcher(group: ModelGroup) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Label("\(group.title) (\(group.items.count))", systemImage: "square.stack.3d.up")
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                if let onOpenGroup {
+                    Button("Open", action: onOpenGroup)
+                        .controlSize(.mini)
+                        .help("Open all parts of \(group.title) in the browser")
+                }
+                Button {
+                    Task {
+                        _ = await slicerService.sendToSlicer(items: group.items, using: slicerService.defaultProfile)
+                        slicerFeedbackBanner = slicerService.lastStatusBanner
+                    }
+                } label: {
+                    Label("Slice All", systemImage: "paperplane.fill")
+                }
+                .controlSize(.mini)
+                .help("Send all \(group.items.count) parts to \(slicerService.defaultProfile.name)")
+            }
+
+            ScrollView {
+                VStack(spacing: 3) {
+                    ForEach(group.items, id: \.filePath) { part in
+                        let isCurrent = part.filePath == item.filePath
+                        Button {
+                            onSelectSiblingPart?(part)
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: isCurrent ? "checkmark.circle.fill" : "cube")
+                                    .font(.caption2)
+                                    .foregroundStyle(isCurrent ? Color.accentColor : .secondary)
+                                    .frame(width: 14)
+
+                                Text(part.displayTitle)
+                                    .font(.caption.weight(isCurrent ? .semibold : .regular))
+                                    .foregroundStyle(isCurrent ? .primary : .secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+
+                                Spacer(minLength: 4)
+
+                                Text(part.format.badgeText)
+                                    .font(.system(size: 8, weight: .bold))
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 1)
+                                    .background(part.format.badgeColor.opacity(0.8))
+                                    .foregroundStyle(.white)
+                                    .clipShape(Capsule())
+
+                                Text(part.formattedFileSize)
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 4)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(isCurrent ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.03))
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .frame(maxHeight: group.items.count > 4 ? 136 : nil)
         }
     }
 
