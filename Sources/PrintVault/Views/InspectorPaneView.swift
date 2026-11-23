@@ -26,6 +26,7 @@ struct InspectorPaneView: View {
             // Top 3D Viewport
             Preview3DView(item: item, onExpand: { showExpandedPreview = true })
                 .frame(height: 295)
+                .clipped()
 
             Divider()
 

@@ -105,7 +105,7 @@ struct Preview3DView: View {
                         .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color(nsColor: .underPageBackgroundColor))
+                .background(Color(nsColor: .underPageBackgroundColor), ignoresSafeAreaEdges: [])
             } else if let errorMessage {
                 VStack(spacing: 8) {
                     Image(systemName: "cube.transparent")
@@ -120,7 +120,7 @@ struct Preview3DView: View {
                         .padding(.horizontal)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color(nsColor: .underPageBackgroundColor))
+                .background(Color(nsColor: .underPageBackgroundColor), ignoresSafeAreaEdges: [])
             }
 
             // Top overlay badges + camera preset switcher + expand button
