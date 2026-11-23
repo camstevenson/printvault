@@ -68,7 +68,6 @@ struct ContentView: View {
     @State private var viewMode: BrowserViewMode = .grid
     @AppStorage("PrintVault.GroupRelatedModels") private var groupRelatedModels: Bool = true
     @State private var openedGroupID: String?
-    @State private var expandedTableGroupIDs: Set<String> = []
 
     @State private var showSlicerSettings: Bool = false
     @State private var showAICategorizeSheet: Bool = false
@@ -78,17 +77,15 @@ struct ContentView: View {
     @State private var categoryIconDraft: String = "cube.box.fill"
     @State private var categoryColorDraft: Color = .blue
     @State private var expandedPreviewItem: PrintFileItem?
-    @State private var highlightedDropCategoryId: UUID?
     @State private var thumbnailGeneration: Int = 0
     @State private var preferEmbedded3MFThumbnails: Bool = ThumbnailService.shared.preferEmbedded3MFThumbnails
 
-    @State private var didPerformInitialBootstrap: Bool = false
-
-    private struct SidebarStats {
+    private struct SidebarStats: Equatable {
         var totalCount = 0
         var favoritesCount = 0
         var uncategorizedCount = 0
         var recentlySlicedCount = 0
+        var categoryCounts: [UUID: Int] = [:]
         var formatCounts: [PrintFileFormat: Int] = [:]
         var statusCounts: [PrintStatus: Int] = [:]
         var folderCounts: [String: Int] = [:]
@@ -101,7 +98,11 @@ struct ContentView: View {
             let folderPaths = folders.map(\.path)
             for item in items {
                 if item.isFavorite { stats.favoritesCount += 1 }
-                if item.category == nil { stats.uncategorizedCount += 1 }
+                if let catID = item.category?.id {
+                    stats.categoryCounts[catID, default: 0] += 1
+                } else {
+                    stats.uncategorizedCount += 1
+                }
                 if item.lastSentToSlicerDate != nil { stats.recentlySlicedCount += 1 }
                 stats.formatCounts[item.format, default: 0] += 1
                 stats.statusCounts[item.printStatus, default: 0] += 1
@@ -115,6 +116,20 @@ struct ContentView: View {
             stats.sortedTags = stats.tagCounts.keys.sorted()
             return stats
         }
+    }
+
+    private struct CategoryRowSnapshot: Identifiable, Equatable {
+        let id: UUID
+        let name: String
+        let iconName: String
+        let count: Int
+    }
+
+    private struct WatchedFolderRowSnapshot: Identifiable, Equatable {
+        let id: String
+        let path: String
+        let displayName: String
+        let count: Int
     }
 
     private func computeFilteredItems() -> [PrintFileItem] {
@@ -217,9 +232,88 @@ struct ContentView: View {
             return nil
         }
 
+        let categorySnapshots = categories.map { cat in
+            CategoryRowSnapshot(
+                id: cat.id,
+                name: cat.name,
+                iconName: cat.iconName,
+                count: stats.categoryCounts[cat.id, default: 0]
+            )
+        }
+        let folderSnapshots = watchedFolders.map { folder in
+            WatchedFolderRowSnapshot(
+                id: folder.path,
+                path: folder.path,
+                displayName: folder.displayName,
+                count: stats.folderCounts[folder.path, default: 0]
+            )
+        }
+
         NavigationSplitView {
-            sidebarView(stats: stats)
-                .navigationSplitViewColumnWidth(min: 220, ideal: 245, max: 290)
+            LibrarySidebarView(
+                selection: $sidebarFilter,
+                selectedValue: sidebarFilter,
+                stats: stats,
+                categories: categorySnapshots,
+                watchedFolders: folderSnapshots,
+                onCreateCategory: { beginCreateCategory() },
+                onEditCategory: { catID in
+                    if let cat = categories.first(where: { $0.id == catID }) {
+                        beginEditCategory(cat)
+                    }
+                },
+                onDeleteCategory: { catID in
+                    if let cat = categories.first(where: { $0.id == catID }) {
+                        if sidebarFilter == .category(catID) {
+                            sidebarFilter = .all
+                        }
+                        modelContext.delete(cat)
+                        try? modelContext.save()
+                    }
+                },
+                onDropPayloadsOnCategory: { droppedPayloads, catID in
+                    guard let category = categories.first(where: { $0.id == catID }) else { return false }
+                    let parsedPaths = droppedPayloads.flatMap {
+                        $0.split(separator: "\n").map(String.init)
+                    }
+                    var targetPaths = Set(parsedPaths)
+                    // If dragging an item that's part of a multi-selection, categorize the whole selection
+                    if !targetPaths.isDisjoint(with: selectedItemPaths) {
+                        targetPaths.formUnion(selectedItemPaths)
+                    }
+                    let matchingItems = allItems.filter { targetPaths.contains($0.filePath) }
+                    guard !matchingItems.isEmpty else { return false }
+                    Task { @MainActor in
+                        for item in matchingItems {
+                            item.category = category
+                        }
+                        try? modelContext.save()
+                        scanner.statusMessage = "Moved \(matchingItems.count) model(s) to \(category.name)."
+                    }
+                    return true
+                },
+                onAddWatchedFolder: { promptAddWatchedFolder() },
+                onScanFolder: {
+                    Task {
+                        await scanner.scanWatchedFolders(context: modelContext)
+                        await scanner.analyzeUnprocessedMeshes(context: modelContext)
+                    }
+                },
+                onRevealFolder: { folderPath in
+                    NSWorkspace.shared.open(URL(fileURLWithPath: folderPath))
+                },
+                onRemoveWatchedFolder: { folderPath in
+                    if let folder = watchedFolders.first(where: { $0.path == folderPath }) {
+                        if sidebarFilter == .folder(folderPath) {
+                            sidebarFilter = .all
+                        }
+                        modelContext.delete(folder)
+                        try? modelContext.save()
+                    }
+                }
+            )
+            .equatable()
+            .navigationSplitViewColumnWidth(min: 220, ideal: 245, max: 290)
         } detail: {
             HSplitView {
                 centerBrowserView(
@@ -312,221 +406,221 @@ struct ContentView: View {
             }
         }
         .task {
-            guard !didPerformInitialBootstrap else { return }
-            didPerformInitialBootstrap = true
             await bootstrapInitialDataAndScan()
         }
     }
 
-    // MARK: - Sidebar
+    // MARK: - Isolated Sidebar View (Avoids Detail-Pane Re-diffs & SwiftData Relationship Faults)
 
-    private func sidebarView(stats: SidebarStats) -> some View {
-        List(selection: $sidebarFilter) {
-            Section("Library") {
-                sidebarRow(
-                    title: "All 3D Models",
-                    icon: "cube",
-                    count: stats.totalCount,
-                    tag: .all
-                )
-                sidebarRow(
-                    title: "Favorites",
-                    icon: "heart",
-                    count: stats.favoritesCount,
-                    tag: .favorites
-                )
-                sidebarRow(
-                    title: "Uncategorized",
-                    icon: "questionmark.folder",
-                    count: stats.uncategorizedCount,
-                    tag: .uncategorized
-                )
-                sidebarRow(
-                    title: "Recently Sliced",
-                    icon: "paperplane",
-                    count: stats.recentlySlicedCount,
-                    tag: .recentlySliced
-                )
-            }
+    private struct LibrarySidebarView: View, Equatable {
+        @Binding var selection: SidebarFilter?
+        let selectedValue: SidebarFilter?
+        let stats: SidebarStats
+        let categories: [CategoryRowSnapshot]
+        let watchedFolders: [WatchedFolderRowSnapshot]
+        let onCreateCategory: () -> Void
+        let onEditCategory: (UUID) -> Void
+        let onDeleteCategory: (UUID) -> Void
+        let onDropPayloadsOnCategory: ([String], UUID) -> Bool
+        let onAddWatchedFolder: () -> Void
+        let onScanFolder: () -> Void
+        let onRevealFolder: (String) -> Void
+        let onRemoveWatchedFolder: (String) -> Void
 
-            Section {
-                ForEach(categories) { category in
-                    HStack {
-                        sidebarLabel(title: category.name, icon: category.iconName)
-                        Spacer()
-                        Text("\(category.items.count)")
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(.vertical, 1)
-                    .background(
-                        highlightedDropCategoryId == category.id
-                            ? RoundedRectangle(cornerRadius: 6).fill(Color.accentColor.opacity(0.18))
-                            : nil
-                    )
-                    .tag(SidebarFilter.category(category.id))
-                    .dropDestination(for: String.self) { droppedPayloads, _ in
-                        let parsedPaths = droppedPayloads.flatMap {
-                            $0.split(separator: "\n").map(String.init)
-                        }
-                        var targetPaths = Set(parsedPaths)
-                        // If dragging an item that's part of a multi-selection, categorize the whole selection
-                        if !targetPaths.isDisjoint(with: selectedItemPaths) {
-                            targetPaths.formUnion(selectedItemPaths)
-                        }
-                        var updated = 0
-                        for item in allItems where targetPaths.contains(item.filePath) {
-                            item.category = category
-                            updated += 1
-                        }
-                        if updated > 0 {
-                            try? modelContext.save()
-                            scanner.statusMessage = "Moved \(updated) model(s) to \(category.name)."
-                        }
-                        return updated > 0
-                    } isTargeted: { isTargeted in
-                        highlightedDropCategoryId = isTargeted ? category.id : nil
-                    }
-                    .contextMenu {
-                        Button {
-                            beginEditCategory(category)
-                        } label: {
-                            Label("Edit Category...", systemImage: "pencil")
-                        }
-                        Divider()
-                        Button(role: .destructive) {
-                            modelContext.delete(category)
-                            try? modelContext.save()
-                        } label: {
-                            Label("Delete Category", systemImage: "trash")
-                        }
-                    }
-                }
-            } header: {
-                HStack {
-                    Text("Categories")
-                    Spacer()
-                    Button {
-                        beginCreateCategory()
-                    } label: {
-                        Image(systemName: "plus.circle")
-                    }
-                    .buttonStyle(.plain)
-                    .help("New Category")
-                }
-            }
+        @State private var highlightedDropCategoryId: UUID?
 
-            Section("3D Formats") {
-                ForEach(PrintFileFormat.allCases) { fmt in
+        nonisolated static func == (lhs: LibrarySidebarView, rhs: LibrarySidebarView) -> Bool {
+            lhs.selectedValue == rhs.selectedValue
+                && lhs.stats == rhs.stats
+                && lhs.categories == rhs.categories
+                && lhs.watchedFolders == rhs.watchedFolders
+        }
+
+        var body: some View {
+            List(selection: $selection) {
+                Section("Library") {
                     sidebarRow(
-                        title: fmt.displayName,
-                        icon: "doc.badge.gearshape",
-                        count: stats.formatCounts[fmt, default: 0],
-                        tag: .format(fmt)
+                        title: "All 3D Models",
+                        icon: "cube",
+                        count: stats.totalCount,
+                        tag: .all
                     )
-                }
-            }
-
-            Section("Print Status") {
-                ForEach(PrintStatus.allCases) { st in
                     sidebarRow(
-                        title: st.label,
-                        icon: st.systemImage,
-                        count: stats.statusCounts[st, default: 0],
-                        tag: .status(st)
+                        title: "Favorites",
+                        icon: "heart",
+                        count: stats.favoritesCount,
+                        tag: .favorites
+                    )
+                    sidebarRow(
+                        title: "Uncategorized",
+                        icon: "questionmark.folder",
+                        count: stats.uncategorizedCount,
+                        tag: .uncategorized
+                    )
+                    sidebarRow(
+                        title: "Recently Sliced",
+                        icon: "paperplane",
+                        count: stats.recentlySlicedCount,
+                        tag: .recentlySliced
                     )
                 }
-            }
 
-            Section {
-                ForEach(watchedFolders) { folder in
-                    HStack {
-                        sidebarLabel(title: folder.displayName, icon: "folder")
-                        Spacer()
-                        Text("\(stats.folderCounts[folder.path, default: 0])")
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                    }
-                    .tag(SidebarFilter.folder(folder.path))
-                    .contextMenu {
-                        Button("Scan Folder Now") {
-                            Task {
-                                await scanner.scanWatchedFolders(context: modelContext)
-                                await scanner.analyzeUnprocessedMeshes(context: modelContext)
-                            }
-                        }
-                        Button("Reveal in Finder") {
-                            NSWorkspace.shared.open(folder.url)
-                        }
-                        Divider()
-                        Button(role: .destructive) {
-                            modelContext.delete(folder)
-                            try? modelContext.save()
-                        } label: {
-                            Label("Remove Watched Folder", systemImage: "trash")
-                        }
-                    }
-                }
-            } header: {
-                HStack {
-                    Text("Watched Folders")
-                    Spacer()
-                    Button {
-                        promptAddWatchedFolder()
-                    } label: {
-                        Image(systemName: "folder.badge.plus")
-                    }
-                    .buttonStyle(.plain)
-                    .help("Add Watched Folder")
-                }
-            }
-
-            if !stats.sortedTags.isEmpty {
-                Section("Tags") {
-                    ForEach(stats.sortedTags, id: \.self) { tag in
+                Section {
+                    ForEach(categories) { category in
                         HStack {
-                            sidebarLabel(title: tag, icon: "tag")
+                            sidebarLabel(title: category.name, icon: category.iconName)
                             Spacer()
-                            Text("\(stats.tagCounts[tag, default: 0])")
+                            Text("\(category.count)")
                                 .font(.caption2.monospacedDigit())
                                 .foregroundStyle(.secondary)
                         }
-                        .tag(SidebarFilter.tag(tag))
+                        .padding(.vertical, 1)
+                        .background(
+                            highlightedDropCategoryId == category.id
+                                ? RoundedRectangle(cornerRadius: 6).fill(Color.accentColor.opacity(0.18))
+                                : nil
+                        )
+                        .tag(SidebarFilter.category(category.id))
+                        .dropDestination(for: String.self) { droppedPayloads, _ in
+                            onDropPayloadsOnCategory(droppedPayloads, category.id)
+                        } isTargeted: { isTargeted in
+                            let nextID: UUID? = isTargeted
+                                ? category.id
+                                : (highlightedDropCategoryId == category.id ? nil : highlightedDropCategoryId)
+                            if highlightedDropCategoryId != nextID {
+                                highlightedDropCategoryId = nextID
+                            }
+                        }
+                        .contextMenu {
+                            Button {
+                                onEditCategory(category.id)
+                            } label: {
+                                Label("Edit Category...", systemImage: "pencil")
+                            }
+                            Divider()
+                            Button(role: .destructive) {
+                                onDeleteCategory(category.id)
+                            } label: {
+                                Label("Delete Category", systemImage: "trash")
+                            }
+                        }
+                    }
+                } header: {
+                    HStack {
+                        Text("Categories")
+                        Spacer()
+                        Button(action: onCreateCategory) {
+                            Image(systemName: "plus.circle")
+                        }
+                        .buttonStyle(.plain)
+                        .help("New Category")
+                    }
+                }
+
+                Section("3D Formats") {
+                    ForEach(PrintFileFormat.allCases) { fmt in
+                        sidebarRow(
+                            title: fmt.displayName,
+                            icon: "doc.badge.gearshape",
+                            count: stats.formatCounts[fmt, default: 0],
+                            tag: .format(fmt)
+                        )
+                    }
+                }
+
+                Section("Print Status") {
+                    ForEach(PrintStatus.allCases) { st in
+                        sidebarRow(
+                            title: st.label,
+                            icon: st.systemImage,
+                            count: stats.statusCounts[st, default: 0],
+                            tag: .status(st)
+                        )
+                    }
+                }
+
+                Section {
+                    ForEach(watchedFolders) { folder in
+                        HStack {
+                            sidebarLabel(title: folder.displayName, icon: "folder")
+                            Spacer()
+                            Text("\(folder.count)")
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                        .tag(SidebarFilter.folder(folder.path))
+                        .contextMenu {
+                            Button("Scan Folder Now", action: onScanFolder)
+                            Button("Reveal in Finder") {
+                                onRevealFolder(folder.path)
+                            }
+                            Divider()
+                            Button(role: .destructive) {
+                                onRemoveWatchedFolder(folder.path)
+                            } label: {
+                                Label("Remove Watched Folder", systemImage: "trash")
+                            }
+                        }
+                    }
+                } header: {
+                    HStack {
+                        Text("Watched Folders")
+                        Spacer()
+                        Button(action: onAddWatchedFolder) {
+                            Image(systemName: "folder.badge.plus")
+                        }
+                        .buttonStyle(.plain)
+                        .help("Add Watched Folder")
+                    }
+                }
+
+                if !stats.sortedTags.isEmpty {
+                    Section("Tags") {
+                        ForEach(stats.sortedTags, id: \.self) { tag in
+                            HStack {
+                                sidebarLabel(title: tag, icon: "tag")
+                                Spacer()
+                                Text("\(stats.tagCounts[tag, default: 0])")
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                            .tag(SidebarFilter.tag(tag))
+                        }
                     }
                 }
             }
+            .listStyle(.sidebar)
         }
-        .listStyle(.sidebar)
-    }
 
-    private func sidebarLabel(title: String, icon: String) -> some View {
-        Label {
-            Text(title)
-                .padding(.leading, 3)
-        } icon: {
-            Image(systemName: icon)
-                .font(.system(size: 12.5, weight: .regular))
-                .symbolRenderingMode(.monochrome)
-                .frame(width: 20, alignment: .center)
-        }
-    }
-
-    private func sidebarRow(
-        title: String,
-        icon: String,
-        count: Int,
-        tag: SidebarFilter
-    ) -> some View {
-        HStack {
-            sidebarLabel(title: title, icon: icon)
-            Spacer()
-            if count > 0 {
-                Text("\(count)")
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
+        private func sidebarLabel(title: String, icon: String) -> some View {
+            Label {
+                Text(title)
+                    .padding(.leading, 3)
+            } icon: {
+                Image(systemName: icon)
+                    .font(.system(size: 12.5, weight: .regular))
+                    .symbolRenderingMode(.monochrome)
+                    .frame(width: 20, alignment: .center)
             }
         }
-        .tag(tag)
+
+        private func sidebarRow(
+            title: String,
+            icon: String,
+            count: Int,
+            tag: SidebarFilter
+        ) -> some View {
+            HStack {
+                sidebarLabel(title: title, icon: icon)
+                Spacer()
+                if count > 0 {
+                    Text("\(count)")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .tag(tag)
+        }
     }
 
     // MARK: - Center Browser View
@@ -981,18 +1075,7 @@ struct ContentView: View {
                             .listRowBackground(isSelected ? Color.accentColor.opacity(0.14) : Color.clear)
 
                     case .group(let group):
-                        DisclosureGroup(
-                            isExpanded: Binding(
-                                get: { expandedTableGroupIDs.contains(group.id) },
-                                set: { isExpanded in
-                                    if isExpanded {
-                                        expandedTableGroupIDs.insert(group.id)
-                                    } else {
-                                        expandedTableGroupIDs.remove(group.id)
-                                    }
-                                }
-                            )
-                        ) {
+                        DisclosureGroup {
                             ForEach(group.items, id: \.filePath) { part in
                                 let isPartSelected = selectedItemPaths.contains(part.filePath)
                                     || (selectedItemPaths.isEmpty && activeItem?.filePath == part.filePath)
