@@ -261,29 +261,25 @@ struct ContentView: View {
             Section("Library") {
                 sidebarRow(
                     title: "All 3D Models",
-                    icon: "cube.fill",
-                    color: .accentColor,
+                    icon: "cube",
                     count: stats.totalCount,
                     tag: .all
                 )
                 sidebarRow(
                     title: "Favorites",
-                    icon: "heart.fill",
-                    color: .red,
+                    icon: "heart",
                     count: stats.favoritesCount,
                     tag: .favorites
                 )
                 sidebarRow(
                     title: "Uncategorized",
-                    icon: "questionmark.folder.fill",
-                    color: .orange,
+                    icon: "questionmark.folder",
                     count: stats.uncategorizedCount,
                     tag: .uncategorized
                 )
                 sidebarRow(
                     title: "Recently Sliced",
-                    icon: "paperplane.fill",
-                    color: .green,
+                    icon: "paperplane",
                     count: stats.recentlySlicedCount,
                     tag: .recentlySliced
                 )
@@ -292,12 +288,7 @@ struct ContentView: View {
             Section {
                 ForEach(categories) { category in
                     HStack {
-                        Label {
-                            Text(category.name)
-                        } icon: {
-                            Image(systemName: category.iconName)
-                                .foregroundStyle(category.color)
-                        }
+                        sidebarLabel(title: category.name, icon: category.iconName)
                         Spacer()
                         Text("\(category.items.count)")
                             .font(.caption2.monospacedDigit())
@@ -306,7 +297,7 @@ struct ContentView: View {
                     .padding(.vertical, 1)
                     .background(
                         highlightedDropCategoryId == category.id
-                            ? RoundedRectangle(cornerRadius: 6).fill(category.color.opacity(0.22))
+                            ? RoundedRectangle(cornerRadius: 6).fill(Color.accentColor.opacity(0.18))
                             : nil
                     )
                     .tag(SidebarFilter.category(category.id))
@@ -362,8 +353,7 @@ struct ContentView: View {
                 ForEach(PrintFileFormat.allCases) { fmt in
                     sidebarRow(
                         title: fmt.displayName,
-                        icon: "doc.badge.gearshape.fill",
-                        color: fmt.badgeColor,
+                        icon: "doc.badge.gearshape",
                         count: stats.formatCounts[fmt, default: 0],
                         tag: .format(fmt)
                     )
@@ -375,7 +365,6 @@ struct ContentView: View {
                     sidebarRow(
                         title: st.label,
                         icon: st.systemImage,
-                        color: st.color,
                         count: stats.statusCounts[st, default: 0],
                         tag: .status(st)
                     )
@@ -385,7 +374,7 @@ struct ContentView: View {
             Section {
                 ForEach(watchedFolders) { folder in
                     HStack {
-                        Label(folder.displayName, systemImage: "folder.fill.badge.gearshape")
+                        sidebarLabel(title: folder.displayName, icon: "folder")
                         Spacer()
                         Text("\(stats.folderCounts[folder.path, default: 0])")
                             .font(.caption2.monospacedDigit())
@@ -429,7 +418,7 @@ struct ContentView: View {
                 Section("Tags") {
                     ForEach(stats.sortedTags, id: \.self) { tag in
                         HStack {
-                            Label(tag, systemImage: "tag.fill")
+                            sidebarLabel(title: tag, icon: "tag")
                             Spacer()
                             Text("\(stats.tagCounts[tag, default: 0])")
                                 .font(.caption2.monospacedDigit())
@@ -443,20 +432,26 @@ struct ContentView: View {
         .listStyle(.sidebar)
     }
 
+    private func sidebarLabel(title: String, icon: String) -> some View {
+        Label {
+            Text(title)
+                .padding(.leading, 3)
+        } icon: {
+            Image(systemName: icon)
+                .font(.system(size: 12.5, weight: .regular))
+                .symbolRenderingMode(.monochrome)
+                .frame(width: 20, alignment: .center)
+        }
+    }
+
     private func sidebarRow(
         title: String,
         icon: String,
-        color: Color,
         count: Int,
         tag: SidebarFilter
     ) -> some View {
         HStack {
-            Label {
-                Text(title)
-            } icon: {
-                Image(systemName: icon)
-                    .foregroundStyle(color)
-            }
+            sidebarLabel(title: title, icon: icon)
             Spacer()
             if count > 0 {
                 Text("\(count)")
