@@ -11,18 +11,29 @@ private actor OffscreenThumbnailRenderer {
     static let shared = OffscreenThumbnailRenderer()
     private let device: MTLDevice? = MTLCreateSystemDefaultDevice()
 
-    func renderPNGData(for url: URL, size: CGSize) async -> Data? {
+    func renderPNGData(
+        for url: URL,
+        size: CGSize,
+        neutralClayStyle: Bool = false
+    ) async -> Data? {
         guard !Task.isCancelled, let device else { return nil }
         guard let loaded = try? await MeshLoaderService.loadMesh(at: url) else {
             return nil
         }
         guard !Task.isCancelled else { return nil }
 
-        let scene = SCNScene()
-        scene.background.contents = NSColor.clear
-        scene.rootNode.addChildNode(loaded.rootNode)
+        let modelClone = loaded.rootNode.clone()
+        if neutralClayStyle {
+            Self.applyNeutralClayMaterial(to: modelClone)
+        }
 
-        let (minB, maxB) = loaded.rootNode.boundingBox
+        let scene = SCNScene()
+        scene.background.contents = neutralClayStyle
+            ? NSColor(calibratedRed: 0.14, green: 0.15, blue: 0.18, alpha: 1.0)
+            : NSColor.clear
+        scene.rootNode.addChildNode(modelClone)
+
+        let (minB, maxB) = modelClone.boundingBox
         let dx = Float(maxB.x - minB.x)
         let dy = Float(maxB.y - minB.y)
         let dz = Float(maxB.z - minB.z)
@@ -80,9 +91,12 @@ private actor OffscreenThumbnailRenderer {
         renderer.pointOfView = cameraNode
         renderer.autoenablesDefaultLighting = false
 
+        let pixelSize = neutralClayStyle
+            ? NSSize(width: size.width, height: size.height)
+            : NSSize(width: size.width * 1.5, height: size.height * 1.5)
         let image = renderer.snapshot(
             atTime: 0,
-            with: NSSize(width: size.width * 1.5, height: size.height * 1.5),
+            with: pixelSize,
             antialiasingMode: .multisampling2X
         )
 
@@ -91,6 +105,22 @@ private actor OffscreenThumbnailRenderer {
             return nil
         }
         return rep.representation(using: .png, properties: [:])
+    }
+
+    private static func applyNeutralClayMaterial(to node: SCNNode) {
+        if let geo = node.geometry?.copy() as? SCNGeometry {
+            let mat = SCNMaterial()
+            mat.lightingModel = .physicallyBased
+            mat.diffuse.contents = NSColor(calibratedWhite: 0.76, alpha: 1.0)
+            mat.roughness.contents = 0.55
+            mat.metalness.contents = 0.04
+            mat.isDoubleSided = true
+            geo.materials = [mat]
+            node.geometry = geo
+        }
+        for child in node.childNodes {
+            applyNeutralClayMaterial(to: child)
+        }
     }
 }
 
@@ -136,6 +166,25 @@ public final class ThumbnailService {
             try? FileManager.default.removeItem(at: dir)
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         }
+    }
+
+    /// Renders a clean 384×384 neutral clay-gray studio PNG for Vision-Language Model classification
+    /// so filament color or bright slicer thumbnails don't bias shape recognition.
+    public func renderNeutralVLMPreviewPNG(for url: URL, size: CGSize = CGSize(width: 384, height: 384)) async -> Data? {
+        if let rendered = await OffscreenThumbnailRenderer.shared.renderPNGData(
+            for: url,
+            size: size,
+            neutralClayStyle: true
+        ) {
+            return rendered
+        }
+        // Fallback: if 3D render fails, convert whatever cached/embedded thumbnail we have into PNG bytes
+        if let thumb = await thumbnail(for: url, size: size),
+           let tiff = thumb.tiffRepresentation,
+           let rep = NSBitmapImageRep(data: tiff) {
+            return rep.representation(using: .png, properties: [:])
+        }
+        return nil
     }
 
     /// Loads or renders a downsampled, pre-decoded thumbnail, cooperating with SwiftUI `.task` cancellation so fast scrolling never stalls.

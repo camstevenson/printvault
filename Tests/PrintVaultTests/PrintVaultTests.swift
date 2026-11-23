@@ -478,4 +478,90 @@ struct PrintVaultTests {
         #expect(second.tryAcquireLock(at: lockURL) == true)
         second.releaseLock()
     }
+
+    // MARK: - Local VLM Auto-Categorizer
+
+    @Test("VLM vision model detection prefers Qwen2.5-VL / FastVLM over text-only LLMs")
+    func vlmVisionModelSelection() {
+        let installed = ["llama3.2:3b", "codellama:7b", "llava:7b", "qwen2.5vl:3b", "nomic-embed-text"]
+        #expect(VLMCategorizerService.isLikelyVisionModel("qwen2.5vl:3b") == true)
+        #expect(VLMCategorizerService.isLikelyVisionModel("gemma3:4b") == true)
+        #expect(VLMCategorizerService.isLikelyVisionModel("llama3.2:3b") == false)
+        #expect(VLMCategorizerService.isLikelyVisionModel("codellama:7b") == false)
+        #expect(VLMCategorizerService.pickPreferredVisionModel(from: installed) == "qwen2.5vl:3b")
+    }
+
+    @Test("VLM JSON parser handles fenced JSON, matches existing categories, sanitizes tags, and supports new categories")
+    @MainActor
+    func vlmJSONParsingAndCategoryMatching() {
+        let categories = PrintCategory.defaultSeeds.enumerated().map { idx, seed in
+            PrintCategory(name: seed.name, iconName: seed.icon, colorHex: seed.hex, sortOrder: idx)
+        }
+
+        let fencedOutput = """
+        Here is my analysis:
+        ```json
+        {
+          "category": "Miniatures & Figurines",
+          "isNewCategory": false,
+          "confidence": 0.94,
+          "tags": ["#gargoyle", "statue", "Statue", "gothic", "a"],
+          "summary": "Crouching gothic gargoyle statue with sculpted wings."
+        }
+        ```
+        """
+        let suggestion = VLMCategorizerService.parseSuggestion(
+            from: fencedOutput,
+            itemFilePath: "/tmp/Gargoyle_Crouching.stl",
+            fileName: "Gargoyle_Crouching.stl",
+            existingCategories: categories,
+            allowNewCategories: false,
+            confidenceThreshold: 0.78,
+            elapsedSeconds: 0.8
+        )
+        #expect(suggestion.errorMessage == nil)
+        #expect(suggestion.suggestedCategoryName == "Miniatures & Figurines")
+        #expect(suggestion.matchedCategoryID != nil)
+        #expect(suggestion.isNewCategory == false)
+        #expect(abs(suggestion.confidence - 0.94) < 0.001)
+        #expect(suggestion.tags == ["gargoyle", "statue", "gothic"])
+        #expect(suggestion.isSelected == true)
+
+        // New category allowed
+        let newCatOutput = """
+        {"category": "Keycaps", "isNewCategory": true, "confidence": 0.89, "tags": ["keycap", "mechanical-keyboard"], "summary": "Sculpted artisan keycaps."}
+        """
+        let newCatSuggestion = VLMCategorizerService.parseSuggestion(
+            from: newCatOutput,
+            itemFilePath: "/tmp/lichking-keycaps.3mf",
+            fileName: "lichking-keycaps.3mf",
+            existingCategories: categories,
+            allowNewCategories: true,
+            confidenceThreshold: 0.78,
+            elapsedSeconds: 0.6
+        )
+        #expect(newCatSuggestion.suggestedCategoryName == "Keycaps")
+        #expect(newCatSuggestion.matchedCategoryID == nil)
+        #expect(newCatSuggestion.isNewCategory == true)
+        #expect(newCatSuggestion.isSelected == true)
+    }
+
+    @Test("VLM prompt embeds physical dimensions, geometry stats, and existing categories")
+    func vlmPromptConstruction() {
+        let prompt = VLMCategorizerService.buildClassificationPrompt(
+            fileName: "compromise.stl",
+            parentFolder: "Downloads",
+            dimensions: "75.2 × 113.3 × 31.1 mm",
+            volumeCm3: 7.48,
+            surfaceAreaCm2: 92.4,
+            triangleCount: 2388,
+            subModelCount: 1,
+            existingCategories: ["Functional Parts", "Miniatures & Figurines"],
+            allowNewCategories: false
+        )
+        #expect(prompt.contains("75.2 × 113.3 × 31.1 mm"))
+        #expect(prompt.contains("7.48 cm³"))
+        #expect(prompt.contains("Functional Parts, Miniatures & Figurines"))
+        #expect(prompt.contains("ignore cryptic or meaningless filenames"))
+    }
 }

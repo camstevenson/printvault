@@ -58,6 +58,7 @@ struct ContentView: View {
 
     @State private var scanner = FileScannerService()
     @State private var slicerService = SlicerService.shared
+    @State private var vlmService = VLMCategorizerService.shared
 
     @State private var sidebarFilter: SidebarFilter? = .all
     @State private var selectedItemPaths: Set<String> = []
@@ -67,6 +68,7 @@ struct ContentView: View {
     @State private var viewMode: BrowserViewMode = .grid
 
     @State private var showSlicerSettings: Bool = false
+    @State private var showAICategorizeSheet: Bool = false
     @State private var showCategorySheet: Bool = false
     @State private var editingCategory: PrintCategory?
     @State private var categoryNameDraft: String = ""
@@ -205,7 +207,9 @@ struct ContentView: View {
                         item: activeItem,
                         categories: categories,
                         slicerService: slicerService,
-                        onOpenSlicerSettings: { showSlicerSettings = true }
+                        vlmService: vlmService,
+                        onOpenSlicerSettings: { showSlicerSettings = true },
+                        onOpenAICategorize: { showAICategorizeSheet = true }
                     )
                     .frame(minWidth: 320, idealWidth: 355, maxWidth: 420, maxHeight: .infinity)
                 } else {
@@ -220,6 +224,19 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showSlicerSettings) {
             SlicerSettingsView(slicerService: slicerService)
+        }
+        .sheet(isPresented: $showAICategorizeSheet) {
+            AICategorizeSheetView(
+                vlmService: vlmService,
+                allItems: allItems,
+                selectedItems: resolveSelectedItems(in: displayedItems),
+                categories: categories,
+                onRunKeywordFallback: {
+                    let count = scanner.autoCategorizeUncategorized(context: modelContext)
+                    scanner.statusMessage = "Keyword rules categorized \(count) model(s)."
+                    return count
+                }
+            )
         }
         .sheet(isPresented: $showCategorySheet) {
             categoryEditorSheet
@@ -484,15 +501,14 @@ struct ContentView: View {
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(.secondary)
 
-                if stats.uncategorizedCount > 0 {
+                if !allItems.isEmpty {
                     Button {
-                        let count = scanner.autoCategorizeUncategorized(context: modelContext)
-                        scanner.statusMessage = "Auto-categorized \(count) model(s)."
+                        showAICategorizeSheet = true
                     } label: {
-                        Label("Auto-Categorize", systemImage: "wand.and.stars")
+                        Label("AI Auto-Categorize", systemImage: "wand.and.stars")
                     }
                     .controlSize(.small)
-                    .help("Automatically categorize uncategorized STL/3MF files using filename & folder heuristics")
+                    .help("Categorize 3D models visually using a local Vision-Language Model (Ollama, LM Studio, or MLX-VLM)")
                 }
 
                 Spacer()

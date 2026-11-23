@@ -7,12 +7,16 @@ struct InspectorPaneView: View {
     @Bindable var item: PrintFileItem
     let categories: [PrintCategory]
     @Bindable var slicerService: SlicerService
+    @Bindable var vlmService: VLMCategorizerService
     let onOpenSlicerSettings: () -> Void
+    let onOpenAICategorize: () -> Void
 
     @AppStorage("PrintVault.EstimatedInfillPercent") private var estimatedInfillPercent: Double = 20.0
     @State private var newTagText: String = ""
     @State private var slicerFeedbackBanner: String?
     @State private var showExpandedPreview: Bool = false
+    @State private var isClassifyingWithAI: Bool = false
+    @State private var aiFeedbackText: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -93,19 +97,46 @@ struct InspectorPaneView: View {
                             Label("Category & Status", systemImage: "folder.badge.gearshape")
                                 .font(.subheadline.weight(.semibold))
                             Spacer()
-                            if item.category == nil {
-                                Button("Auto-Suggest") {
-                                    if let suggested = FileScannerService.suggestCategory(
-                                        fileName: item.fileName,
-                                        filePath: item.filePath,
-                                        finderTags: item.tags,
-                                        availableCategories: categories
-                                    ) {
-                                        item.category = suggested
-                                    }
+                            if isClassifyingWithAI {
+                                HStack(spacing: 5) {
+                                    ProgressView()
+                                        .controlSize(.mini)
+                                    Text("Analyzing...")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            } else {
+                                Button {
+                                    runSingleItemAICategorize()
+                                } label: {
+                                    Label("AI Categorize", systemImage: "sparkles")
                                 }
                                 .controlSize(.mini)
+                                .help("Classify this 3D model visually using your local Vision-Language Model")
                             }
+                        }
+
+                        if let aiFeedbackText {
+                            HStack(spacing: 5) {
+                                Image(systemName: "sparkles")
+                                    .font(.caption2)
+                                    .foregroundStyle(Color.accentColor)
+                                Text(aiFeedbackText)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                                Spacer()
+                                Button {
+                                    self.aiFeedbackText = nil
+                                } label: {
+                                    Image(systemName: "xmark")
+                                        .font(.caption2)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .padding(6)
+                            .background(Color.accentColor.opacity(0.08))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
                         }
 
                         Picker("Category", selection: $item.category) {
@@ -340,6 +371,9 @@ struct InspectorPaneView: View {
         .sheet(isPresented: $showExpandedPreview) {
             ExpandedPreview3DSheet(item: item, slicerService: slicerService)
         }
+        .onChange(of: item.filePath) { _, _ in
+            aiFeedbackText = nil
+        }
     }
 
     // MARK: - Slicer Action Bar
@@ -428,6 +462,48 @@ struct InspectorPaneView: View {
             item.tags.append(trimmed)
         }
         newTagText = ""
+    }
+
+    private func runSingleItemAICategorize() {
+        guard !isClassifyingWithAI else { return }
+        isClassifyingWithAI = true
+        aiFeedbackText = nil
+
+        let targetItem = item
+        Task {
+            defer { isClassifyingWithAI = false }
+            if case .connected = vlmService.connectionState {
+                // Already connected
+            } else {
+                await vlmService.detectLocalRuntimes()
+            }
+
+            guard case .connected = vlmService.connectionState, !vlmService.config.selectedModel.isEmpty else {
+                // Open the full AI Auto-Categorize sheet so the user can 1-click Start Ollama or Download qwen2.5vl:3b
+                onOpenAICategorize()
+                return
+            }
+
+            let suggestion = await vlmService.classifySingleItem(targetItem, existingCategories: categories)
+            if let err = suggestion.errorMessage {
+                aiFeedbackText = err
+                return
+            }
+
+            let applied = vlmService.applySingleSuggestion(
+                suggestion,
+                to: targetItem,
+                existingCategories: categories,
+                context: modelContext
+            )
+            if applied {
+                try? modelContext.save()
+                let pct = Int((suggestion.confidence * 100).rounded())
+                aiFeedbackText = "\(suggestion.suggestedCategoryName) (\(pct)%)" + (suggestion.summary.isEmpty ? "" : " — \(suggestion.summary)")
+            } else {
+                aiFeedbackText = "No category match found."
+            }
+        }
     }
 }
 

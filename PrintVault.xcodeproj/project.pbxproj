@@ -15,6 +15,7 @@
 		4FF2AD5C58FFDC96A7F5FC91 /* PrintVaultApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF7403208CB6A5511BF0E496 /* PrintVaultApp.swift */; };
 		910A21828FCD54A1497B35DE /* Preview3DView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CEE8693706AA8E68D264FFCA /* Preview3DView.swift */; };
 		A33BE3FDD1FEC693F0839A77 /* MeshLoaderService.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4694B5CA2099C7CF8FFBB70 /* MeshLoaderService.swift */; };
+		BA63FE113DA918426373D622 /* VLMCategorizerService.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD74E4B29BCC5C29D7ECDFC0 /* VLMCategorizerService.swift */; };
 		BB4A25B94C9F70AF9D492040 /* SingleInstanceGuard.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2E42803C8A9911FB29584A2 /* SingleInstanceGuard.swift */; };
 		C87A49778298A15BE2A79794 /* SampleMeshGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4F17F3ACB5D4F84AF57D6AC /* SampleMeshGenerator.swift */; };
 		C9BC0050CACE8AAD2C9E4386 /* FinderTagService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1724A5892F8AAF5358EC3C2D /* FinderTagService.swift */; };
@@ -22,6 +23,7 @@
 		E687A2510EF7C8B846D55F05 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA6BBD9A24062379E7F052A /* ContentView.swift */; };
 		F30716722C6949DBF72525E1 /* ThumbnailService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD74AE747DFFA76BC68DA8D6 /* ThumbnailService.swift */; };
 		F9492E051030956416C6DD0E /* SlicerService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7A10ED1CCCA650CDD5847B9 /* SlicerService.swift */; };
+		FF1C614218EED79C571BE4A5 /* AICategorizeSheetView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D73C981760C3958376CB092 /* AICategorizeSheetView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -36,12 +38,14 @@
 
 /* Begin PBXFileReference section */
 		1724A5892F8AAF5358EC3C2D /* FinderTagService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinderTagService.swift; sourceTree = "<group>"; };
+		2D73C981760C3958376CB092 /* AICategorizeSheetView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AICategorizeSheetView.swift; sourceTree = "<group>"; };
 		43AEBCF925566A2365170EFC /* PrintVaultTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrintVaultTests.swift; sourceTree = "<group>"; };
 		4AA6BBD9A24062379E7F052A /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		592852C88B23DBD828525BFE /* PrintModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrintModels.swift; sourceTree = "<group>"; };
 		62291B42C319108A384C8815 /* InspectorPaneView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InspectorPaneView.swift; sourceTree = "<group>"; };
 		70C2269F1D7B2E396600BFA5 /* PrintVault.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PrintVault.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A303E50FD5D89D8C6CDF1D05 /* PrintVault.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = PrintVault.entitlements; sourceTree = "<group>"; };
+		AD74E4B29BCC5C29D7ECDFC0 /* VLMCategorizerService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VLMCategorizerService.swift; sourceTree = "<group>"; };
 		B92075C3E37C9F5CCC1F7C73 /* SlicerSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlicerSettingsView.swift; sourceTree = "<group>"; };
 		C098A4EEB2EC7D5C52BB87BD /* FileScannerService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileScannerService.swift; sourceTree = "<group>"; };
 		C7A10ED1CCCA650CDD5847B9 /* SlicerService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlicerService.swift; sourceTree = "<group>"; };
@@ -108,6 +112,7 @@
 		A0975ACA2DDF74471569059C /* Views */ = {
 			isa = PBXGroup;
 			children = (
+				2D73C981760C3958376CB092 /* AICategorizeSheetView.swift */,
 				4AA6BBD9A24062379E7F052A /* ContentView.swift */,
 				62291B42C319108A384C8815 /* InspectorPaneView.swift */,
 				C87968BB4346441AD276559F /* ModelGridCardView.swift */,
@@ -127,6 +132,7 @@
 				F2E42803C8A9911FB29584A2 /* SingleInstanceGuard.swift */,
 				C7A10ED1CCCA650CDD5847B9 /* SlicerService.swift */,
 				DD74AE747DFFA76BC68DA8D6 /* ThumbnailService.swift */,
+				AD74E4B29BCC5C29D7ECDFC0 /* VLMCategorizerService.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -185,7 +191,7 @@
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
-				LastUpgradeCheck = 1430;
+				LastUpgradeCheck = 1600;
 				TargetAttributes = {
 					A22F822100A67A40796FF8A4 = {
 						DevelopmentTeam = "";
@@ -220,6 +226,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				FF1C614218EED79C571BE4A5 /* AICategorizeSheetView.swift in Sources */,
 				E687A2510EF7C8B846D55F05 /* ContentView.swift in Sources */,
 				14B525AF6F16D03D001C0C24 /* FileScannerService.swift in Sources */,
 				C9BC0050CACE8AAD2C9E4386 /* FinderTagService.swift in Sources */,
@@ -234,6 +241,7 @@
 				F9492E051030956416C6DD0E /* SlicerService.swift in Sources */,
 				1E3E065F4391ED9CFB3BA5A4 /* SlicerSettingsView.swift in Sources */,
 				F30716722C6949DBF72525E1 /* ThumbnailService.swift in Sources */,
+				BA63FE113DA918426373D622 /* VLMCategorizerService.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
