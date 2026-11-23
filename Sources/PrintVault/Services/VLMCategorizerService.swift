@@ -593,15 +593,20 @@ public final class VLMCategorizerService {
             return false
         }
 
+        let normalizedTarget = Self.normalizeCategoryKey(targetName)
         if let id = suggestion.matchedCategoryID,
            let matched = existingCategories.first(where: { $0.id == id }) {
             item.category = matched
-        } else if let byName = existingCategories.first(where: { $0.name.caseInsensitiveCompare(targetName) == .orderedSame }) {
+        } else if let byName = existingCategories.first(where: {
+            $0.name.caseInsensitiveCompare(targetName) == .orderedSame
+                || (!normalizedTarget.isEmpty && Self.normalizeCategoryKey($0.name) == normalizedTarget)
+        }) {
             item.category = byName
         } else {
-            let (icon, hex) = Self.pickStyleForNewCategory(name: targetName, existingCount: existingCategories.count)
+            let formattedName = Self.formatCategoryDisplayName(targetName)
+            let (icon, hex) = Self.pickStyleForNewCategory(name: formattedName, existingCount: existingCategories.count)
             let created = PrintCategory(
-                name: targetName,
+                name: formattedName,
                 iconName: icon,
                 colorHex: hex,
                 sortOrder: existingCategories.count
@@ -757,8 +762,8 @@ public final class VLMCategorizerService {
             : existingCategories.joined(separator: ", ")
 
         let categoryRule = allowNewCategories
-            ? "Choose the best matching category from the list above, OR if the object clearly belongs to a distinct niche not covered (e.g. Keycaps, Tabletop Terrain, Board Games, Jewelry), propose a concise 1–3 word category name and set \"isNewCategory\": true."
-            : "You MUST choose the single best matching category strictly from this list: [\(categoryList)]. Set \"isNewCategory\": false."
+            ? "Choose the best matching category from the list above using its EXACT spelling and capitalization (never return hyphenated or underscored slugs like 'functional-parts'). Only if the object clearly belongs to a distinct niche not covered (e.g. Keycaps, Tabletop Terrain, Board Games, Jewelry), propose a concise 1–3 word Title Case category name and set \"isNewCategory\": true."
+            : "You MUST choose the single best matching category strictly from this list using its EXACT spelling: [\(categoryList)]. Set \"isNewCategory\": false."
 
         var metricsLines: [String] = []
         if dimensions != "—" { metricsLines.append("- Dimensions: \(dimensions)") }
@@ -829,11 +834,16 @@ public final class VLMCategorizerService {
         let rawCategory = (parsed.category ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let confidence = min(1.0, max(0.0, parsed.confidence ?? 0.7))
 
-        // Match against existing categories (exact case-insensitive first, then substring match)
+        // Match against existing categories: exact -> normalized slug/punctuation -> normalized substring
+        let normalizedRaw = normalizeCategoryKey(rawCategory)
         let matchedCat: PrintCategory? = existingCategories.first(where: {
             $0.name.caseInsensitiveCompare(rawCategory) == .orderedSame
         }) ?? existingCategories.first(where: {
-            !rawCategory.isEmpty && ($0.name.localizedCaseInsensitiveContains(rawCategory) || rawCategory.localizedCaseInsensitiveContains($0.name))
+            !normalizedRaw.isEmpty && normalizeCategoryKey($0.name) == normalizedRaw
+        }) ?? existingCategories.first(where: {
+            let normExisting = normalizeCategoryKey($0.name)
+            return !normalizedRaw.isEmpty && !normExisting.isEmpty
+                && (normExisting.contains(normalizedRaw) || normalizedRaw.contains(normExisting))
         })
 
         let finalCategoryName: String
@@ -842,13 +852,13 @@ public final class VLMCategorizerService {
             finalCategoryName = matchedCat.name
             isNew = false
         } else if allowNewCategories && !rawCategory.isEmpty && rawCategory.caseInsensitiveCompare("Uncategorized") != .orderedSame {
-            finalCategoryName = rawCategory
+            finalCategoryName = formatCategoryDisplayName(rawCategory)
             isNew = true
         } else if let fallback = existingCategories.first, !rawCategory.isEmpty {
             finalCategoryName = fallback.name
             isNew = false
         } else {
-            finalCategoryName = rawCategory.isEmpty ? "Uncategorized" : rawCategory
+            finalCategoryName = rawCategory.isEmpty ? "Uncategorized" : formatCategoryDisplayName(rawCategory)
             isNew = matchedCat == nil && allowNewCategories
         }
 
@@ -883,6 +893,92 @@ public final class VLMCategorizerService {
             elapsedSeconds: elapsedSeconds,
             errorMessage: nil
         )
+    }
+
+    /// Normalizes category names so slugified VLM outputs (e.g. "functional-parts", "functional_parts",
+    /// "calibration-test", "household-and-mounts") match existing categories ("Functional Parts",
+    /// "Calibration & Test", "Household & Mounts").
+    public nonisolated static func normalizeCategoryKey(_ name: String) -> String {
+        let tokens = name
+            .lowercased()
+            .replacingOccurrences(of: "&", with: " ")
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty && $0 != "and" }
+        return tokens.joined(separator: " ")
+    }
+
+    /// Formats a proposed new category slug (e.g. "tabletop-terrain" or "keycaps") into clean Title Case ("Tabletop Terrain", "Keycaps").
+    public nonisolated static func formatCategoryDisplayName(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return trimmed }
+        // If it already contains uppercase letters and spaces (and no slug separators), preserve it as-is
+        let hasSlugSep = trimmed.contains("-") || trimmed.contains("_")
+        let hasUpper = trimmed.rangeOfCharacter(from: .uppercaseLetters) != nil
+        if hasUpper && !hasSlugSep {
+            return trimmed
+        }
+
+        let words = trimmed
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .split(whereSeparator: \.isWhitespace)
+            .map(String.init)
+        guard !words.isEmpty else { return trimmed }
+
+        return words.enumerated().map { idx, word in
+            let lower = word.lowercased()
+            if idx > 0 && lower == "and" { return "&" }
+            if idx > 0 && (lower == "of" || lower == "for" || lower == "the") { return lower }
+            return lower.prefix(1).uppercased() + lower.dropFirst()
+        }.joined(separator: " ")
+    }
+
+    /// Merges any duplicate categories that share the same normalized key (e.g. `functional-parts` and `functional_parts` into `Functional Parts`).
+    /// Returns `(mergedCategoriesRemoved, modelsMoved)`.
+    @discardableResult
+    public static func mergeDuplicateCategories(context: ModelContext) -> (removedCategories: Int, movedModels: Int) {
+        let categories = (try? context.fetch(FetchDescriptor<PrintCategory>(sortBy: [SortDescriptor(\.sortOrder)]))) ?? []
+        let items = (try? context.fetch(FetchDescriptor<PrintFileItem>())) ?? []
+
+        var groups: [String: [PrintCategory]] = [:]
+        for cat in categories {
+            let key = normalizeCategoryKey(cat.name)
+            guard !key.isEmpty else { continue }
+            groups[key, default: []].append(cat)
+        }
+
+        var removedCount = 0
+        var movedCount = 0
+
+        for (_, group) in groups where group.count > 1 {
+            // Prefer non-slug, capitalized, earliest-created category as the canonical target
+            let sorted = group.sorted { a, b in
+                let aSlug = a.name.contains("-") || a.name.contains("_") || a.name == a.name.lowercased()
+                let bSlug = b.name.contains("-") || b.name.contains("_") || b.name == b.name.lowercased()
+                if aSlug != bSlug { return !aSlug }
+                if a.sortOrder != b.sortOrder { return a.sortOrder < b.sortOrder }
+                return a.createdAt < b.createdAt
+            }
+            guard let canonical = sorted.first else { continue }
+            let duplicates = sorted.dropFirst()
+            let duplicateIDs = Set(duplicates.map(\.id))
+
+            for item in items {
+                if let catID = item.category?.id, duplicateIDs.contains(catID) {
+                    item.category = canonical
+                    movedCount += 1
+                }
+            }
+            for dup in duplicates {
+                context.delete(dup)
+                removedCount += 1
+            }
+        }
+
+        if removedCount > 0 || movedCount > 0 {
+            try? context.save()
+        }
+        return (removedCount, movedCount)
     }
 
     /// Extracts the outermost `{ ... }` JSON object from raw LLM output (handling markdown code fences or prose preambles).

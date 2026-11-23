@@ -527,23 +527,83 @@ struct PrintVaultTests {
         #expect(suggestion.tags == ["gargoyle", "statue", "gothic"])
         #expect(suggestion.isSelected == true)
 
-        // New category allowed
+        // Slugified VLM category names must match existing categories instead of spawning duplicates
+        for (slug, expected) in [
+            ("functional-parts", "Functional Parts"),
+            ("functional_parts", "Functional Parts"),
+            ("calibration-test", "Calibration & Test"),
+            ("household-and-mounts", "Household & Mounts"),
+            ("organizers-gridfinity", "Organizers & Gridfinity")
+        ] {
+            let slugRes = VLMCategorizerService.parseSuggestion(
+                from: "{\"category\": \"\(slug)\", \"isNewCategory\": true, \"confidence\": 0.9, \"tags\": [], \"summary\": \"\"}",
+                itemFilePath: "/tmp/test.stl",
+                fileName: "test.stl",
+                existingCategories: categories,
+                allowNewCategories: true,
+                confidenceThreshold: 0.78,
+                elapsedSeconds: 0.2
+            )
+            #expect(slugRes.suggestedCategoryName == expected)
+            #expect(slugRes.matchedCategoryID != nil)
+            #expect(slugRes.isNewCategory == false)
+        }
+
+        // New category allowed — slugs are formatted cleanly into Title Case
         let newCatOutput = """
-        {"category": "Keycaps", "isNewCategory": true, "confidence": 0.89, "tags": ["keycap", "mechanical-keyboard"], "summary": "Sculpted artisan keycaps."}
+        {"category": "tabletop-terrain", "isNewCategory": true, "confidence": 0.89, "tags": ["terrain", "fence"], "summary": "Gothic tabletop terrain."}
         """
         let newCatSuggestion = VLMCategorizerService.parseSuggestion(
             from: newCatOutput,
-            itemFilePath: "/tmp/lichking-keycaps.3mf",
-            fileName: "lichking-keycaps.3mf",
+            itemFilePath: "/tmp/wrought-iron-fence.stl",
+            fileName: "wrought-iron-fence.stl",
             existingCategories: categories,
             allowNewCategories: true,
             confidenceThreshold: 0.78,
             elapsedSeconds: 0.6
         )
-        #expect(newCatSuggestion.suggestedCategoryName == "Keycaps")
+        #expect(newCatSuggestion.suggestedCategoryName == "Tabletop Terrain")
         #expect(newCatSuggestion.matchedCategoryID == nil)
         #expect(newCatSuggestion.isNewCategory == true)
         #expect(newCatSuggestion.isSelected == true)
+    }
+
+    @Test("mergeDuplicateCategories collapses slugified duplicates into canonical categories and preserves models")
+    @MainActor
+    func mergeDuplicateSlugCategories() throws {
+        let schema = Schema([PrintFileItem.self, PrintCategory.self, WatchedFolder.self])
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
+        )
+        let ctx = container.mainContext
+
+        let canonical = PrintCategory(name: "Functional Parts", sortOrder: 0)
+        let dupHyphen = PrintCategory(name: "functional-parts", sortOrder: 6)
+        let dupUnderscore = PrintCategory(name: "functional_parts", sortOrder: 7)
+        let distinct = PrintCategory(name: "Keycaps", sortOrder: 8)
+        ctx.insert(canonical)
+        ctx.insert(dupHyphen)
+        ctx.insert(dupUnderscore)
+        ctx.insert(distinct)
+
+        let item1 = PrintFileItem(filePath: "/tmp/a.stl", fileName: "a.stl", fileExtension: "stl", fileSize: 10, dateModified: Date(), category: dupHyphen)
+        let item2 = PrintFileItem(filePath: "/tmp/b.stl", fileName: "b.stl", fileExtension: "stl", fileSize: 10, dateModified: Date(), category: dupUnderscore)
+        let item3 = PrintFileItem(filePath: "/tmp/c.stl", fileName: "c.stl", fileExtension: "stl", fileSize: 10, dateModified: Date(), category: distinct)
+        ctx.insert(item1)
+        ctx.insert(item2)
+        ctx.insert(item3)
+        try ctx.save()
+
+        let (removed, moved) = VLMCategorizerService.mergeDuplicateCategories(context: ctx)
+        #expect(removed == 2)
+        #expect(moved == 2)
+        #expect(item1.category?.name == "Functional Parts")
+        #expect(item2.category?.name == "Functional Parts")
+        #expect(item3.category?.name == "Keycaps")
+
+        let remainingCats = try ctx.fetch(FetchDescriptor<PrintCategory>())
+        #expect(remainingCats.count == 2)
     }
 
     @Test("VLM prompt embeds physical dimensions, geometry stats, and existing categories")

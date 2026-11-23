@@ -945,6 +945,15 @@ struct ContentView: View {
                 }
 
                 Button {
+                    let (removed, moved) = VLMCategorizerService.mergeDuplicateCategories(context: modelContext)
+                    scanner.statusMessage = removed > 0
+                        ? "Merged \(removed) duplicate categor\(removed == 1 ? "y" : "ies") (\(moved) model\(moved == 1 ? "" : "s") moved)."
+                        : "No duplicate categories found."
+                } label: {
+                    Label("Merge Duplicate Categories", systemImage: "arrow.triangle.merge")
+                }
+
+                Button {
                     preferEmbedded3MFThumbnails.toggle()
                     ThumbnailService.shared.preferEmbedded3MFThumbnails = preferEmbedded3MFThumbnails
                     ThumbnailService.shared.clearCache()
@@ -1068,8 +1077,9 @@ struct ContentView: View {
     // MARK: - Bootstrap & File Dialog Helpers
 
     private func bootstrapInitialDataAndScan() async {
-        // Remove any previously indexed unsupported formats (e.g. .obj, .ply)
+        // Remove any previously indexed unsupported formats (e.g. .obj, .ply) and collapse slug duplicate categories
         _ = scanner.pruneUnsupportedFormats(context: modelContext)
+        _ = VLMCategorizerService.mergeDuplicateCategories(context: modelContext)
 
         if categories.isEmpty {
             for (idx, seed) in PrintCategory.defaultSeeds.enumerated() {
