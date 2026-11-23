@@ -16,7 +16,7 @@ Built with **Swift 6**, **SwiftUI**, **SwiftData**, **SceneKit**, and **Metal**,
 
 ### Organization & Categorization
 - **Custom Categories** — Create, edit, and color-code categories with custom SF Symbols, or drag and drop models directly onto sidebar categories.
-- **Smart Auto-Categorization** — Keyword and Finder-tag heuristics automatically sort models into categories like *Organizers & Gridfinity*, *Functional Parts*, *Miniatures & Figurines*, *Household & Mounts*, *Cosplay & Props*, and *Calibration & Test*.
+- **AI Visual Auto-Categorization (Local VLM)** — Renders a neutral matte-gray 3D studio view of each model paired with its physical dimensions (`mm`) and geometry metrics, then classifies models locally via **Ollama**, **LM Studio**, or any OpenAI-compatible **MLX-VLM** server (with auto-detection, 1-click Ollama launch & `qwen2.5vl:3b` download, confidence-scored review UI, optional new-category creation, auto-generated tags, and 1-line model summaries)—plus instant keyword-heuristic fallback.
 - **Multi-Select Batch Actions** — `⌘`-click in Grid view (or multi-select in Table view) to categorize, update print status, or send multiple models to a slicer at once.
 - **Native macOS Finder Tag Sync** — Read existing Finder tags on import and push categories/tags back to macOS Finder metadata.
 - **Print Tracking** — Track print status (*Unprinted*, *In Queue*, *Printing*, *Printed*, *Needs Fix*), star ratings, favorites, slice history, and per-model print notes persisted in SwiftData.
@@ -134,8 +134,10 @@ PrintVault/
 │   │   ├── SampleMeshGenerator.swift             # Procedural sample .stl & .3mf generator
 │   │   ├── SingleInstanceGuard.swift             # Single-instance POSIX lock & window focus
 │   │   ├── SlicerService.swift                   # Slicer detection & extensible hook pipeline
-│   │   └── ThumbnailService.swift                # Off-main-thread Metal renderer & disk cache
+│   │   ├── ThumbnailService.swift                # Off-main-thread Metal renderer & disk cache
+│   │   └── VLMCategorizerService.swift           # Local VLM (Ollama/LM Studio/MLX-VLM) categorizer
 │   └── Views/
+│       ├── AICategorizeSheetView.swift           # Batch AI categorization & confidence review UI
 │       ├── ContentView.swift                     # Split-view sidebar, grid/table browser, batch bar
 │       ├── ModelGridCardView.swift               # Lightweight model card with drag & context menu
 │       ├── InspectorPaneView.swift               # Metrics, categorization, tags, slicer actions
@@ -149,12 +151,7 @@ PrintVault/
 
 ## Contributing
 
-Contributions are welcome! Feel free to open an issue or submit a pull request:
-
-1. Fork the repository and create a feature branch (`git checkout -b feature/my-feature`).
-2. Add or update unit tests in `Tests/PrintVaultTests/PrintVaultTests.swift`.
-3. Ensure `swift test` passes with zero warnings.
-4. Open a pull request describing your changes.
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, coding guidelines, and the pull request process.
 
 ---
 
