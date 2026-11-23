@@ -478,4 +478,322 @@ struct PrintVaultTests {
         #expect(second.tryAcquireLock(at: lockURL) == true)
         second.releaseLock()
     }
+
+    // MARK: - Local VLM Auto-Categorizer
+
+    @Test("VLM vision model detection prefers Qwen2.5-VL / FastVLM over text-only LLMs")
+    func vlmVisionModelSelection() {
+        let installed = ["llama3.2:3b", "codellama:7b", "llava:7b", "qwen2.5vl:3b", "nomic-embed-text"]
+        #expect(VLMCategorizerService.isLikelyVisionModel("qwen2.5vl:3b") == true)
+        #expect(VLMCategorizerService.isLikelyVisionModel("gemma3:4b") == true)
+        #expect(VLMCategorizerService.isLikelyVisionModel("llama3.2:3b") == false)
+        #expect(VLMCategorizerService.isLikelyVisionModel("codellama:7b") == false)
+        #expect(VLMCategorizerService.pickPreferredVisionModel(from: installed) == "qwen2.5vl:3b")
+    }
+
+    @Test("VLM JSON parser handles fenced JSON, matches existing categories, sanitizes tags, and supports new categories")
+    @MainActor
+    func vlmJSONParsingAndCategoryMatching() {
+        let categories = PrintCategory.defaultSeeds.enumerated().map { idx, seed in
+            PrintCategory(name: seed.name, iconName: seed.icon, colorHex: seed.hex, sortOrder: idx)
+        }
+
+        let fencedOutput = """
+        Here is my analysis:
+        ```json
+        {
+          "category": "Miniatures & Figurines",
+          "isNewCategory": false,
+          "confidence": 0.94,
+          "tags": ["#gargoyle", "statue", "Statue", "gothic", "a"],
+          "summary": "Crouching gothic gargoyle statue with sculpted wings."
+        }
+        ```
+        """
+        let suggestion = VLMCategorizerService.parseSuggestion(
+            from: fencedOutput,
+            itemFilePath: "/tmp/Gargoyle_Crouching.stl",
+            fileName: "Gargoyle_Crouching.stl",
+            existingCategories: categories,
+            allowNewCategories: false,
+            confidenceThreshold: 0.78,
+            elapsedSeconds: 0.8
+        )
+        #expect(suggestion.errorMessage == nil)
+        #expect(suggestion.suggestedCategoryName == "Miniatures & Figurines")
+        #expect(suggestion.matchedCategoryID != nil)
+        #expect(suggestion.isNewCategory == false)
+        #expect(abs(suggestion.confidence - 0.94) < 0.001)
+        #expect(suggestion.tags == ["gargoyle", "statue", "gothic"])
+        #expect(suggestion.isSelected == true)
+
+        // Slugified VLM category names must match existing categories instead of spawning duplicates
+        for (slug, expected) in [
+            ("functional-parts", "Functional Parts"),
+            ("functional_parts", "Functional Parts"),
+            ("calibration-test", "Calibration & Test"),
+            ("household-and-mounts", "Household & Mounts"),
+            ("organizers-gridfinity", "Organizers & Gridfinity")
+        ] {
+            let slugRes = VLMCategorizerService.parseSuggestion(
+                from: "{\"category\": \"\(slug)\", \"isNewCategory\": true, \"confidence\": 0.9, \"tags\": [], \"summary\": \"\"}",
+                itemFilePath: "/tmp/test.stl",
+                fileName: "test.stl",
+                existingCategories: categories,
+                allowNewCategories: true,
+                confidenceThreshold: 0.78,
+                elapsedSeconds: 0.2
+            )
+            #expect(slugRes.suggestedCategoryName == expected)
+            #expect(slugRes.matchedCategoryID != nil)
+            #expect(slugRes.isNewCategory == false)
+        }
+
+        // New category allowed — slugs are formatted cleanly into Title Case
+        let newCatOutput = """
+        {"category": "tabletop-terrain", "isNewCategory": true, "confidence": 0.89, "tags": ["terrain", "fence"], "summary": "Gothic tabletop terrain."}
+        """
+        let newCatSuggestion = VLMCategorizerService.parseSuggestion(
+            from: newCatOutput,
+            itemFilePath: "/tmp/wrought-iron-fence.stl",
+            fileName: "wrought-iron-fence.stl",
+            existingCategories: categories,
+            allowNewCategories: true,
+            confidenceThreshold: 0.78,
+            elapsedSeconds: 0.6
+        )
+        #expect(newCatSuggestion.suggestedCategoryName == "Tabletop Terrain")
+        #expect(newCatSuggestion.matchedCategoryID == nil)
+        #expect(newCatSuggestion.isNewCategory == true)
+        #expect(newCatSuggestion.isSelected == true)
+    }
+
+    @Test("mergeDuplicateCategories collapses slugified duplicates into canonical categories and preserves models")
+    @MainActor
+    func mergeDuplicateSlugCategories() throws {
+        let schema = Schema([PrintFileItem.self, PrintCategory.self, WatchedFolder.self])
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
+        )
+        let ctx = container.mainContext
+
+        let canonical = PrintCategory(name: "Functional Parts", sortOrder: 0)
+        let dupHyphen = PrintCategory(name: "functional-parts", sortOrder: 6)
+        let dupUnderscore = PrintCategory(name: "functional_parts", sortOrder: 7)
+        let distinct = PrintCategory(name: "Keycaps", sortOrder: 8)
+        ctx.insert(canonical)
+        ctx.insert(dupHyphen)
+        ctx.insert(dupUnderscore)
+        ctx.insert(distinct)
+
+        let item1 = PrintFileItem(filePath: "/tmp/a.stl", fileName: "a.stl", fileExtension: "stl", fileSize: 10, dateModified: Date(), category: dupHyphen)
+        let item2 = PrintFileItem(filePath: "/tmp/b.stl", fileName: "b.stl", fileExtension: "stl", fileSize: 10, dateModified: Date(), category: dupUnderscore)
+        let item3 = PrintFileItem(filePath: "/tmp/c.stl", fileName: "c.stl", fileExtension: "stl", fileSize: 10, dateModified: Date(), category: distinct)
+        ctx.insert(item1)
+        ctx.insert(item2)
+        ctx.insert(item3)
+        try ctx.save()
+
+        let (removed, moved) = VLMCategorizerService.mergeDuplicateCategories(context: ctx)
+        #expect(removed == 2)
+        #expect(moved == 2)
+        #expect(item1.category?.name == "Functional Parts")
+        #expect(item2.category?.name == "Functional Parts")
+        #expect(item3.category?.name == "Keycaps")
+
+        let remainingCats = try ctx.fetch(FetchDescriptor<PrintCategory>())
+        #expect(remainingCats.count == 2)
+    }
+
+    @Test("VLM prompt embeds physical dimensions, geometry stats, and existing categories")
+    func vlmPromptConstruction() {
+        let prompt = VLMCategorizerService.buildClassificationPrompt(
+            fileName: "compromise.stl",
+            parentFolder: "Downloads",
+            dimensions: "75.2 × 113.3 × 31.1 mm",
+            volumeCm3: 7.48,
+            surfaceAreaCm2: 92.4,
+            triangleCount: 2388,
+            subModelCount: 1,
+            existingCategories: ["Functional Parts", "Miniatures & Figurines"],
+            allowNewCategories: false
+        )
+        #expect(prompt.contains("75.2 × 113.3 × 31.1 mm"))
+        #expect(prompt.contains("7.48 cm³"))
+        #expect(prompt.contains("Functional Parts, Miniatures & Figurines"))
+        #expect(prompt.contains("ignore cryptic or meaningless filenames"))
+    }
+
+    // MARK: - Smart Multi-Part Model Grouping
+
+    private func makeTestItem(
+        path: String,
+        fileSize: Int64 = 1000,
+        category: PrintCategory? = nil
+    ) -> PrintFileItem {
+        let url = URL(fileURLWithPath: path)
+        return PrintFileItem(
+            filePath: path,
+            fileName: url.lastPathComponent,
+            fileExtension: url.pathExtension.lowercased(),
+            fileSize: fileSize,
+            dateModified: Date(),
+            discoverySource: .watchedFolder,
+            category: category
+        )
+    }
+
+    @Test("ModelGroupingService groups cohesive project subfolders, unwraps archive wrappers, tolerates VLM category variance across parts, and excludes stray files")
+    @MainActor
+    func groupingCohesiveSubfoldersAndWrappers() {
+        let watched = ["/Users/tester/Downloads"]
+        let minisCat = PrintCategory(name: "Miniatures & Figurines", sortOrder: 0)
+        let funcCat = PrintCategory(name: "Functional Parts", sortOrder: 1)
+        let cosplayCat = PrintCategory(name: "Cosplay & Props", sortOrder: 2)
+
+        // 1. Dedicated project folder with shared folder/file tokens + assembly file + mixed VLM categories
+        let hogwarts1 = makeTestItem(path: "/Users/tester/Downloads/Hogwarts_Castle/hogwarts_part_1.3mf", fileSize: 50_000, category: minisCat)
+        let hogwarts2 = makeTestItem(path: "/Users/tester/Downloads/Hogwarts_Castle/hogwarts_part_2.3mf", fileSize: 60_000, category: funcCat)
+        let hogwartsAsm = makeTestItem(path: "/Users/tester/Downloads/Hogwarts_Castle/hogwarts_assembly.3mf", fileSize: 20_000, category: minisCat)
+
+        // 2. Thingiverse/Printables `files/` wrapper subfolder with VLM category variance across parts
+        let rattleBlade = makeTestItem(path: "/Users/tester/Downloads/Baby_Sword_Rattle_1411578/files/Blade_2.stl", fileSize: 12_000, category: minisCat)
+        let rattleHandle = makeTestItem(path: "/Users/tester/Downloads/Baby_Sword_Rattle_1411578/files/Handle.stl", fileSize: 18_000, category: funcCat)
+        let rattlePommel = makeTestItem(path: "/Users/tester/Downloads/Baby_Sword_Rattle_1411578/files/Pommel.stl", fileSize: 10_000, category: cosplayCat)
+
+        // 3. Printables `-model_files` folder
+        let marbleCorner = makeTestItem(path: "/Users/tester/Downloads/wall-mounted-marble-run-model_files/corner-v3.stl", fileSize: 8_000, category: funcCat)
+        let marbleLoop = makeTestItem(path: "/Users/tester/Downloads/wall-mounted-marble-run-model_files/loop-track-v2.stl", fileSize: 9_000, category: minisCat)
+
+        // 4. Non-archive project folder with an unrelated stray file dropped inside
+        let whelp1 = makeTestItem(path: "/Users/tester/Downloads/warcraft_rumble_whelp_eggs/Warcraft_Rumble_Whelp_Eggs.stl", category: minisCat)
+        let whelp2 = makeTestItem(path: "/Users/tester/Downloads/warcraft_rumble_whelp_eggs/Warcraft_Rumble_Whelp_Eggs_Base.stl", category: minisCat)
+        let strayKeycap = makeTestItem(path: "/Users/tester/Downloads/warcraft_rumble_whelp_eggs/1.25u Blank.stl", category: funcCat)
+
+        let entries = ModelGroupingService.groupItems(
+            [hogwarts1, hogwarts2, hogwartsAsm, rattleBlade, rattleHandle, rattlePommel, marbleCorner, marbleLoop, whelp1, whelp2, strayKeycap],
+            watchedFolderPaths: watched
+        )
+
+        // Expect 4 groups + 1 stray standalone keycap
+        #expect(entries.count == 5)
+
+        let groups: [ModelGroup] = entries.compactMap { entry in
+            if case .group(let g) = entry { return g }
+            return nil
+        }
+        let singles: [PrintFileItem] = entries.compactMap { entry in
+            if case .single(let item) = entry { return item }
+            return nil
+        }
+
+        #expect(groups.count == 4)
+        #expect(singles.count == 1)
+        #expect(singles.first?.filePath == strayKeycap.filePath)
+
+        let hogwartsGroup = groups.first { $0.title == "Hogwarts Castle" }
+        #expect(hogwartsGroup?.items.count == 3)
+        #expect(hogwartsGroup?.reason == .projectFolder)
+        #expect(hogwartsGroup?.primaryItem.filePath == hogwartsAsm.filePath)
+
+        let rattleGroup = groups.first { $0.title == "Baby Sword Rattle" }
+        #expect(rattleGroup?.items.count == 3)
+        #expect(rattleGroup?.reason == .projectFolder)
+
+        let marbleGroup = groups.first { $0.title == "Wall Mounted Marble Run" }
+        #expect(marbleGroup?.items.count == 2)
+    }
+
+    @Test("ModelGroupingService avoids grouping dissimilar files in watched roots, generic STL folders, mixed subfolders, or conflicting weak folders")
+    @MainActor
+    func groupingAvoidsFalsePositives() {
+        let watched = ["/Users/tester/Downloads"]
+        let minisCat = PrintCategory(name: "Miniatures & Figurines", sortOrder: 0)
+        let funcCat = PrintCategory(name: "Functional Parts", sortOrder: 1)
+        let cosplayCat = PrintCategory(name: "Cosplay & Props", sortOrder: 2)
+
+        // 1. Unrelated files directly inside watched Downloads folder
+        let gargoyle = makeTestItem(path: "/Users/tester/Downloads/Gargoyle_Crouching.stl", category: minisCat)
+        let nipple = makeTestItem(path: "/Users/tester/Downloads/3_4_npt_4_nipple.stl", category: funcCat)
+        let compromise = makeTestItem(path: "/Users/tester/Downloads/compromise.stl", category: funcCat)
+
+        // 2. Unrelated files inside a generic `STL files` container
+        let ax = makeTestItem(path: "/Users/tester/Documents/3D Printing/STL files/Barbarian_Viking_Ax.stl", category: minisCat)
+        let cap = makeTestItem(path: "/Users/tester/Documents/3D Printing/STL files/Cap_51mm.STL", category: funcCat)
+        let clip = makeTestItem(path: "/Users/tester/Documents/3D Printing/STL files/car-glasses-clip-v4.stl", category: funcCat)
+
+        // 3. Unrelated files inside a custom grab-bag subfolder
+        let dragon = makeTestItem(path: "/Users/tester/Downloads/Weekend_Prints/dragon.stl", category: minisCat)
+        let phoneStand = makeTestItem(path: "/Users/tester/Downloads/Weekend_Prints/phone_stand.stl", category: funcCat)
+        let hoseAdapter = makeTestItem(path: "/Users/tester/Downloads/Weekend_Prints/hose_adapter.stl", category: funcCat)
+
+        // 4. Weak assembly-word-only subfolder with conflicting categories (Category Consistency Veto)
+        let conflictA = makeTestItem(path: "/Users/tester/Downloads/Mixed_Batch/helmet_stand.stl", category: cosplayCat)
+        let conflictB = makeTestItem(path: "/Users/tester/Downloads/Mixed_Batch/cable_clip.stl", category: funcCat)
+
+        let entries = ModelGroupingService.groupItems(
+            [gargoyle, nipple, compromise, ax, cap, clip, dragon, phoneStand, hoseAdapter, conflictA, conflictB],
+            watchedFolderPaths: watched
+        )
+
+        #expect(entries.count == 11)
+        let groupCount = entries.filter {
+            if case .group = $0 { return true }
+            return false
+        }.count
+        #expect(groupCount == 0)
+    }
+
+    @Test("ModelGroupingService groups explicit multi-part stems, double extensions, and matching STL/3MF pairs inside generic folders")
+    @MainActor
+    func groupingSharedStemsInGenericFolder() {
+        let watched = ["/Users/tester/Downloads"]
+
+        let hogAsm = makeTestItem(path: "/Users/tester/Downloads/Hogwarts_-_assembly.3mf", fileSize: 30_000)
+        let hog1 = makeTestItem(path: "/Users/tester/Downloads/Hogwarts_-_part_1.3mf", fileSize: 80_000)
+        let hog2 = makeTestItem(path: "/Users/tester/Downloads/Hogwarts_-_part_2.3mf", fileSize: 90_000)
+
+        let lichBase = makeTestItem(path: "/Users/tester/Desktop/AK_lichking.3mf", fileSize: 40_000)
+        let lichCenter = makeTestItem(path: "/Users/tester/Desktop/AK_lichking-center-1.3mf.stl", fileSize: 20_000)
+        let lichLeft = makeTestItem(path: "/Users/tester/Desktop/AK_lichking-left.3mf.stl", fileSize: 18_000)
+
+        let tower = makeTestItem(path: "/Users/tester/Desktop/tower.stl", fileSize: 35_000)
+        let towerTop = makeTestItem(path: "/Users/tester/Desktop/tower_top.stl", fileSize: 12_000)
+        let towerBottom = makeTestItem(path: "/Users/tester/Desktop/tower_bottom.stl", fileSize: 14_000)
+
+        let unrelated = makeTestItem(path: "/Users/tester/Downloads/Gargoyle_Crouching.stl", fileSize: 25_000)
+
+        let entries = ModelGroupingService.groupItems(
+            [hog1, unrelated, hogAsm, lichBase, hog2, lichCenter, lichLeft, tower, towerTop, towerBottom],
+            watchedFolderPaths: watched
+        )
+
+        // Expect: Hogwarts (3), AK Lichking (3), Tower (3), standalone Gargoyle (1)
+        #expect(entries.count == 4)
+
+        let groups: [ModelGroup] = entries.compactMap { entry in
+            if case .group(let g) = entry { return g }
+            return nil
+        }
+        let singles: [PrintFileItem] = entries.compactMap { entry in
+            if case .single(let item) = entry { return item }
+            return nil
+        }
+
+        #expect(groups.count == 3)
+        #expect(singles.count == 1)
+        #expect(singles.first?.filePath == unrelated.filePath)
+
+        let hogGroup = groups.first { $0.title == "Hogwarts" }
+        #expect(hogGroup?.items.count == 3)
+        #expect(hogGroup?.reason == .sharedStem)
+        #expect(hogGroup?.primaryItem.filePath == hogAsm.filePath)
+
+        let lichGroup = groups.first { $0.title == "AK lichking" }
+        #expect(lichGroup?.items.count == 3)
+
+        let towerGroup = groups.first { $0.title == "Tower" }
+        #expect(towerGroup?.items.count == 3)
+    }
 }

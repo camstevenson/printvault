@@ -58,6 +58,7 @@ struct ContentView: View {
 
     @State private var scanner = FileScannerService()
     @State private var slicerService = SlicerService.shared
+    @State private var vlmService = VLMCategorizerService.shared
 
     @State private var sidebarFilter: SidebarFilter? = .all
     @State private var selectedItemPaths: Set<String> = []
@@ -65,8 +66,12 @@ struct ContentView: View {
     @State private var searchText: String = ""
     @State private var sortOrder: BrowserSortOrder = .dateModified
     @State private var viewMode: BrowserViewMode = .grid
+    @AppStorage("PrintVault.GroupRelatedModels") private var groupRelatedModels: Bool = true
+    @State private var openedGroupID: String?
+    @State private var expandedTableGroupIDs: Set<String> = []
 
     @State private var showSlicerSettings: Bool = false
+    @State private var showAICategorizeSheet: Bool = false
     @State private var showCategorySheet: Bool = false
     @State private var editingCategory: PrintCategory?
     @State private var categoryNameDraft: String = ""
@@ -190,14 +195,40 @@ struct ContentView: View {
     var body: some View {
         let displayedItems = computeFilteredItems()
         let stats = SidebarStats.build(from: allItems, folders: watchedFolders)
-        let activeItem = resolveSelectedItem(in: displayedItems)
+        let browserEntries: [BrowserEntry] = groupRelatedModels
+            ? ModelGroupingService.groupItems(displayedItems, watchedFolderPaths: watchedFolders.map(\.path))
+            : displayedItems.map { .single($0) }
+        let activeOpenedGroup: ModelGroup? = openedGroupID.flatMap { gid in
+            for entry in browserEntries {
+                if case .group(let group) = entry, group.id == gid {
+                    return group
+                }
+            }
+            return nil
+        }
+        let activeItem = resolveSelectedItem(in: activeOpenedGroup?.items ?? displayedItems)
+        let activeItemGroup: ModelGroup? = activeItem.flatMap { active in
+            for entry in browserEntries {
+                if case .group(let group) = entry,
+                   group.items.contains(where: { $0.filePath == active.filePath }) {
+                    return group
+                }
+            }
+            return nil
+        }
 
         NavigationSplitView {
             sidebarView(stats: stats)
                 .navigationSplitViewColumnWidth(min: 220, ideal: 245, max: 290)
         } detail: {
             HSplitView {
-                centerBrowserView(displayedItems: displayedItems, stats: stats, activeItem: activeItem)
+                centerBrowserView(
+                    displayedItems: displayedItems,
+                    browserEntries: browserEntries,
+                    activeOpenedGroup: activeOpenedGroup,
+                    stats: stats,
+                    activeItem: activeItem
+                )
                     .frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity)
 
                 if let activeItem {
@@ -205,7 +236,19 @@ struct ContentView: View {
                         item: activeItem,
                         categories: categories,
                         slicerService: slicerService,
-                        onOpenSlicerSettings: { showSlicerSettings = true }
+                        vlmService: vlmService,
+                        onOpenSlicerSettings: { showSlicerSettings = true },
+                        onOpenAICategorize: { showAICategorizeSheet = true },
+                        containingGroup: activeItemGroup,
+                        onSelectSiblingPart: { sibling in
+                            selectedItemPaths = [sibling.filePath]
+                            primarySelectedPath = sibling.filePath
+                        },
+                        onOpenGroup: activeItemGroup.map { group in
+                            {
+                                openedGroupID = group.id
+                            }
+                        }
                     )
                     .frame(minWidth: 320, idealWidth: 355, maxWidth: 420, maxHeight: .infinity)
                 } else {
@@ -214,12 +257,33 @@ struct ContentView: View {
                 }
             }
         }
+        .onChange(of: sidebarFilter) { _, _ in
+            openedGroupID = nil
+        }
+        .onChange(of: groupRelatedModels) { _, isGrouped in
+            if !isGrouped {
+                openedGroupID = nil
+            }
+        }
         .searchable(text: $searchText, placement: .toolbar, prompt: "Search STL, 3MF, tags, categories...")
         .toolbar {
             toolbarContent
         }
         .sheet(isPresented: $showSlicerSettings) {
             SlicerSettingsView(slicerService: slicerService)
+        }
+        .sheet(isPresented: $showAICategorizeSheet) {
+            AICategorizeSheetView(
+                vlmService: vlmService,
+                allItems: allItems,
+                selectedItems: resolveSelectedItems(in: displayedItems),
+                categories: categories,
+                onRunKeywordFallback: {
+                    let count = scanner.autoCategorizeUncategorized(context: modelContext)
+                    scanner.statusMessage = "Keyword rules categorized \(count) model(s)."
+                    return count
+                }
+            )
         }
         .sheet(isPresented: $showCategorySheet) {
             categoryEditorSheet
@@ -301,8 +365,11 @@ struct ContentView: View {
                             : nil
                     )
                     .tag(SidebarFilter.category(category.id))
-                    .dropDestination(for: String.self) { droppedPaths, _ in
-                        var targetPaths = Set(droppedPaths)
+                    .dropDestination(for: String.self) { droppedPayloads, _ in
+                        let parsedPaths = droppedPayloads.flatMap {
+                            $0.split(separator: "\n").map(String.init)
+                        }
+                        var targetPaths = Set(parsedPaths)
                         // If dragging an item that's part of a multi-selection, categorize the whole selection
                         if !targetPaths.isDisjoint(with: selectedItemPaths) {
                             targetPaths.formUnion(selectedItemPaths)
@@ -466,31 +533,59 @@ struct ContentView: View {
 
     private func centerBrowserView(
         displayedItems: [PrintFileItem],
+        browserEntries: [BrowserEntry],
+        activeOpenedGroup: ModelGroup?,
         stats: SidebarStats,
         activeItem: PrintFileItem?
     ) -> some View {
         let defaultSlicerName = slicerService.defaultProfile.name
         let slicerProfiles = slicerService.profiles
+        let groupCount = browserEntries.reduce(0) { count, entry in
+            if case .group = entry { return count + 1 }
+            return count
+        }
 
         return VStack(spacing: 0) {
             // Sub-header bar
             HStack(spacing: 12) {
-                Text("\(displayedItems.count) model\(displayedItems.count == 1 ? "" : "s")")
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(.secondary)
+                if let opened = activeOpenedGroup {
+                    Text("\(opened.items.count) parts in \(opened.title)")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                } else if groupRelatedModels && groupCount > 0 {
+                    Text("\(browserEntries.count) models (\(displayedItems.count) files)")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                } else {
+                    Text("\(displayedItems.count) model\(displayedItems.count == 1 ? "" : "s")")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.secondary)
+                }
 
-                if stats.uncategorizedCount > 0 {
+                if !allItems.isEmpty {
                     Button {
-                        let count = scanner.autoCategorizeUncategorized(context: modelContext)
-                        scanner.statusMessage = "Auto-categorized \(count) model(s)."
+                        showAICategorizeSheet = true
                     } label: {
-                        Label("Auto-Categorize", systemImage: "wand.and.stars")
+                        Label("AI Auto-Categorize", systemImage: "wand.and.stars")
                     }
                     .controlSize(.small)
-                    .help("Automatically categorize uncategorized STL/3MF files using filename & folder heuristics")
+                    .help("Categorize 3D models visually using a local Vision-Language Model (Ollama, LM Studio, or MLX-VLM)")
                 }
 
                 Spacer()
+
+                Toggle(isOn: $groupRelatedModels) {
+                    Label("Group", systemImage: "square.stack.3d.up")
+                }
+                .toggleStyle(.button)
+                .controlSize(.small)
+                .help(
+                    groupRelatedModels
+                        ? "Grouping related multi-part models (click for flat list)"
+                        : "Showing all files individually (click to group related multi-part models)"
+                )
 
                 Picker("Sort", selection: $sortOrder) {
                     ForEach(BrowserSortOrder.allCases) { order in
@@ -518,10 +613,16 @@ struct ContentView: View {
             .padding(.vertical, 8)
             .background(Color(nsColor: .windowBackgroundColor))
 
+            // Drilled-in Multi-Part Group Breadcrumb Bar
+            if let opened = activeOpenedGroup {
+                Divider()
+                groupDrillInBar(group: opened, defaultSlicerName: defaultSlicerName)
+            }
+
             // Multi-select Batch Action Bar
             if selectedItemPaths.count > 1 {
                 Divider()
-                batchActionBar(displayedItems: displayedItems)
+                batchActionBar(displayedItems: activeOpenedGroup?.items ?? displayedItems)
             }
 
             Divider()
@@ -535,34 +636,94 @@ struct ContentView: View {
                         columns: [GridItem(.adaptive(minimum: 205, maximum: 260), spacing: 14)],
                         spacing: 14
                     ) {
-                        ForEach(displayedItems, id: \.filePath) { item in
-                            let isSelected = selectedItemPaths.contains(item.filePath)
-                                || (selectedItemPaths.isEmpty && activeItem?.filePath == item.filePath)
-                            ModelGridCardView(
-                                item: item,
-                                isSelected: isSelected,
-                                categories: categories,
-                                defaultSlicerName: defaultSlicerName,
-                                slicerProfiles: slicerProfiles,
-                                thumbnailGeneration: thumbnailGeneration,
-                                onSendToSlicer: { targetItem, profile in
-                                    Task {
-                                        _ = await slicerService.sendToSlicer(items: [targetItem], using: profile)
+                        if let opened = activeOpenedGroup {
+                            ForEach(opened.items, id: \.filePath) { item in
+                                let isSelected = selectedItemPaths.contains(item.filePath)
+                                    || (selectedItemPaths.isEmpty && activeItem?.filePath == item.filePath)
+                                ModelGridCardView(
+                                    item: item,
+                                    isSelected: isSelected,
+                                    categories: categories,
+                                    defaultSlicerName: defaultSlicerName,
+                                    slicerProfiles: slicerProfiles,
+                                    thumbnailGeneration: thumbnailGeneration,
+                                    onSendToSlicer: { targetItem, profile in
+                                        Task {
+                                            _ = await slicerService.sendToSlicer(items: [targetItem], using: profile)
+                                        }
+                                    },
+                                    onSelect: { toggleMulti in
+                                        handleSelection(for: item, toggleMulti: toggleMulti)
+                                    },
+                                    onDoubleClick: {
+                                        expandedPreviewItem = item
                                     }
-                                },
-                                onSelect: { toggleMulti in
-                                    handleSelection(for: item, toggleMulti: toggleMulti)
-                                },
-                                onDoubleClick: {
-                                    expandedPreviewItem = item
+                                )
+                            }
+                        } else {
+                            ForEach(browserEntries) { entry in
+                                switch entry {
+                                case .single(let item):
+                                    let isSelected = selectedItemPaths.contains(item.filePath)
+                                        || (selectedItemPaths.isEmpty && activeItem?.filePath == item.filePath)
+                                    ModelGridCardView(
+                                        item: item,
+                                        isSelected: isSelected,
+                                        categories: categories,
+                                        defaultSlicerName: defaultSlicerName,
+                                        slicerProfiles: slicerProfiles,
+                                        thumbnailGeneration: thumbnailGeneration,
+                                        onSendToSlicer: { targetItem, profile in
+                                            Task {
+                                                _ = await slicerService.sendToSlicer(items: [targetItem], using: profile)
+                                            }
+                                        },
+                                        onSelect: { toggleMulti in
+                                            handleSelection(for: item, toggleMulti: toggleMulti)
+                                        },
+                                        onDoubleClick: {
+                                            expandedPreviewItem = item
+                                        }
+                                    )
+                                case .group(let group):
+                                    let isSelected = group.items.contains(where: { selectedItemPaths.contains($0.filePath) })
+                                        || (selectedItemPaths.isEmpty && group.items.contains(where: { $0.filePath == activeItem?.filePath }))
+                                    ModelGroupCardView(
+                                        group: group,
+                                        isSelected: isSelected,
+                                        categories: categories,
+                                        defaultSlicerName: defaultSlicerName,
+                                        slicerProfiles: slicerProfiles,
+                                        thumbnailGeneration: thumbnailGeneration,
+                                        onSendAllToSlicer: { itemsToSlice, profile in
+                                            Task {
+                                                _ = await slicerService.sendToSlicer(items: itemsToSlice, using: profile)
+                                            }
+                                        },
+                                        onSelect: {
+                                            selectedItemPaths = [group.primaryItem.filePath]
+                                            primarySelectedPath = group.primaryItem.filePath
+                                        },
+                                        onOpenGroup: {
+                                            openedGroupID = group.id
+                                            selectedItemPaths = [group.primaryItem.filePath]
+                                            primarySelectedPath = group.primaryItem.filePath
+                                        }
+                                    )
                                 }
-                            )
+                            }
                         }
                     }
                     .padding(14)
                 }
             } else {
-                tableBrowserView(displayedItems: displayedItems)
+                if let opened = activeOpenedGroup {
+                    tableBrowserView(displayedItems: opened.items)
+                } else if groupRelatedModels && groupCount > 0 {
+                    groupedTableBrowserView(browserEntries: browserEntries, activeItem: activeItem)
+                } else {
+                    tableBrowserView(displayedItems: displayedItems)
+                }
             }
 
             Divider()
@@ -574,6 +735,66 @@ struct ContentView: View {
             handleDroppedProviders(providers)
             return true
         }
+    }
+
+    private func groupDrillInBar(group: ModelGroup, defaultSlicerName: String) -> some View {
+        HStack(spacing: 10) {
+            Button {
+                openedGroupID = nil
+            } label: {
+                Label("Back", systemImage: "chevron.left")
+            }
+            .controlSize(.small)
+            .keyboardShortcut("[", modifiers: .command)
+            .help("Return to model library (⌘[)")
+
+            Image(systemName: group.reason == .projectFolder ? "folder.fill" : "square.stack.3d.up.fill")
+                .font(.caption)
+                .foregroundStyle(Color.accentColor)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(group.title)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                Text("\(group.items.count) parts • \(group.reason.rawValue) • \(group.formattedTotalFileSize)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Menu {
+                Button("Uncategorized") {
+                    for item in group.items { item.category = nil }
+                    try? modelContext.save()
+                }
+                Divider()
+                ForEach(categories) { category in
+                    Button {
+                        for item in group.items { item.category = category }
+                        try? modelContext.save()
+                    } label: {
+                        Label(category.name, systemImage: category.iconName)
+                    }
+                }
+            } label: {
+                Label("Categorize All", systemImage: "folder")
+            }
+            .controlSize(.small)
+
+            Button {
+                Task {
+                    _ = await slicerService.sendToSlicer(items: group.items)
+                }
+            } label: {
+                Label("Send All \(group.items.count) to \(defaultSlicerName)", systemImage: "paperplane.fill")
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 7)
+        .background(Color.accentColor.opacity(0.07))
     }
 
     private func batchActionBar(displayedItems: [PrintFileItem]) -> some View {
@@ -639,91 +860,98 @@ struct ContentView: View {
         .background(Color.accentColor.opacity(0.08))
     }
 
+    private var tableHeaderRow: some View {
+        HStack(spacing: 12) {
+            Text("Model Name")
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text("Category")
+                .frame(width: 150, alignment: .leading)
+            Text("Dimensions (mm)")
+                .frame(width: 145, alignment: .leading)
+            Text("Triangles")
+                .frame(width: 80, alignment: .trailing)
+            Text("Size")
+                .frame(width: 75, alignment: .trailing)
+            Text("Slicer")
+                .frame(width: 75, alignment: .center)
+        }
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 6)
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private func tableItemRow(for item: PrintFileItem) -> some View {
+        HStack(spacing: 12) {
+            HStack(spacing: 8) {
+                Text(item.format.badgeText)
+                    .font(.system(size: 9, weight: .bold))
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(item.format.badgeColor.opacity(0.85))
+                    .foregroundStyle(.white)
+                    .clipShape(Capsule())
+                Text(item.displayTitle)
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Group {
+                if let cat = item.category {
+                    Label(cat.name, systemImage: cat.iconName)
+                        .font(.caption)
+                        .foregroundStyle(cat.color)
+                        .lineLimit(1)
+                } else {
+                    Text("Uncategorized")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 150, alignment: .leading)
+
+            Text(item.formattedDimensions)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 145, alignment: .leading)
+
+            Text(item.triangleCount > 0 ? item.triangleCount.formatted() : "—")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 80, alignment: .trailing)
+
+            Text(item.formattedFileSize)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 75, alignment: .trailing)
+
+            Button {
+                Task {
+                    _ = await slicerService.sendToSlicer(items: [item])
+                }
+            } label: {
+                Label("Slice", systemImage: "paperplane.fill")
+            }
+            .controlSize(.small)
+            .frame(width: 75, alignment: .center)
+        }
+        .padding(.vertical, 2)
+        .draggable(item.filePath)
+        .contextMenu {
+            tableRowContextMenu(for: item)
+        }
+    }
+
     private func tableBrowserView(displayedItems: [PrintFileItem]) -> some View {
         VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                Text("Model Name")
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Text("Category")
-                    .frame(width: 150, alignment: .leading)
-                Text("Dimensions (mm)")
-                    .frame(width: 145, alignment: .leading)
-                Text("Triangles")
-                    .frame(width: 80, alignment: .trailing)
-                Text("Size")
-                    .frame(width: 75, alignment: .trailing)
-                Text("Slicer")
-                    .frame(width: 75, alignment: .center)
-            }
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 6)
-            .background(Color(nsColor: .controlBackgroundColor))
-
+            tableHeaderRow
             Divider()
 
             List(displayedItems, id: \.filePath, selection: $selectedItemPaths) { item in
-                HStack(spacing: 12) {
-                    HStack(spacing: 8) {
-                        Text(item.format.badgeText)
-                            .font(.system(size: 9, weight: .bold))
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 2)
-                            .background(item.format.badgeColor.opacity(0.85))
-                            .foregroundStyle(.white)
-                            .clipShape(Capsule())
-                        Text(item.displayTitle)
-                            .fontWeight(.medium)
-                            .lineLimit(1)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                    Group {
-                        if let cat = item.category {
-                            Label(cat.name, systemImage: cat.iconName)
-                                .font(.caption)
-                                .foregroundStyle(cat.color)
-                                .lineLimit(1)
-                        } else {
-                            Text("Uncategorized")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .frame(width: 150, alignment: .leading)
-
-                    Text(item.formattedDimensions)
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .frame(width: 145, alignment: .leading)
-
-                    Text(item.triangleCount > 0 ? item.triangleCount.formatted() : "—")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .frame(width: 80, alignment: .trailing)
-
-                    Text(item.formattedFileSize)
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .frame(width: 75, alignment: .trailing)
-
-                    Button {
-                        Task {
-                            _ = await slicerService.sendToSlicer(items: [item])
-                        }
-                    } label: {
-                        Label("Slice", systemImage: "paperplane.fill")
-                    }
-                    .controlSize(.small)
-                    .frame(width: 75, alignment: .center)
-                }
-                .padding(.vertical, 2)
-                .tag(item.filePath)
-                .draggable(item.filePath)
-                .contextMenu {
-                    tableRowContextMenu(for: item)
-                }
+                tableItemRow(for: item)
+                    .tag(item.filePath)
             }
             .listStyle(.inset(alternatesRowBackgrounds: true))
             .onChange(of: selectedItemPaths) { _, newValue in
@@ -731,6 +959,164 @@ struct ContentView: View {
                     primarySelectedPath = last
                 }
             }
+        }
+    }
+
+    private func groupedTableBrowserView(browserEntries: [BrowserEntry], activeItem: PrintFileItem?) -> some View {
+        VStack(spacing: 0) {
+            tableHeaderRow
+            Divider()
+
+            List {
+                ForEach(browserEntries) { entry in
+                    switch entry {
+                    case .single(let item):
+                        let isSelected = selectedItemPaths.contains(item.filePath)
+                            || (selectedItemPaths.isEmpty && activeItem?.filePath == item.filePath)
+                        tableItemRow(for: item)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                handleSelection(for: item, toggleMulti: NSEvent.modifierFlags.contains(.command))
+                            }
+                            .listRowBackground(isSelected ? Color.accentColor.opacity(0.14) : Color.clear)
+
+                    case .group(let group):
+                        DisclosureGroup(
+                            isExpanded: Binding(
+                                get: { expandedTableGroupIDs.contains(group.id) },
+                                set: { isExpanded in
+                                    if isExpanded {
+                                        expandedTableGroupIDs.insert(group.id)
+                                    } else {
+                                        expandedTableGroupIDs.remove(group.id)
+                                    }
+                                }
+                            )
+                        ) {
+                            ForEach(group.items, id: \.filePath) { part in
+                                let isPartSelected = selectedItemPaths.contains(part.filePath)
+                                    || (selectedItemPaths.isEmpty && activeItem?.filePath == part.filePath)
+                                tableItemRow(for: part)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        handleSelection(for: part, toggleMulti: NSEvent.modifierFlags.contains(.command))
+                                    }
+                                    .listRowBackground(isPartSelected ? Color.accentColor.opacity(0.14) : Color.clear)
+                            }
+                        } label: {
+                            HStack(spacing: 12) {
+                                HStack(spacing: 8) {
+                                    Image(systemName: group.reason == .projectFolder ? "folder.fill" : "square.stack.3d.up.fill")
+                                        .font(.caption)
+                                        .foregroundStyle(Color.accentColor)
+                                    Text(group.title)
+                                        .fontWeight(.semibold)
+                                        .lineLimit(1)
+                                    Text("\(group.items.count) parts")
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 1)
+                                        .background(Color.accentColor.opacity(0.14))
+                                        .foregroundStyle(Color.accentColor)
+                                        .clipShape(Capsule())
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+
+                                Group {
+                                    if let cat = group.sharedCategory {
+                                        Label(cat.name, systemImage: cat.iconName)
+                                            .font(.caption)
+                                            .foregroundStyle(cat.color)
+                                            .lineLimit(1)
+                                    } else if group.items.contains(where: { $0.category != nil }) {
+                                        Text("Mixed Categories")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    } else {
+                                        Text("Uncategorized")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                .frame(width: 150, alignment: .leading)
+
+                                Text(group.reason.rawValue)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 145, alignment: .leading)
+
+                                Text("—")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 80, alignment: .trailing)
+
+                                Text(group.formattedTotalFileSize)
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 75, alignment: .trailing)
+
+                                Button {
+                                    Task {
+                                        _ = await slicerService.sendToSlicer(items: group.items)
+                                    }
+                                } label: {
+                                    Label("Slice All", systemImage: "paperplane.fill")
+                                }
+                                .controlSize(.small)
+                                .frame(width: 75, alignment: .center)
+                            }
+                            .padding(.vertical, 2)
+                            .contentShape(Rectangle())
+                            .onTapGesture(count: 2) {
+                                openedGroupID = group.id
+                                selectedItemPaths = [group.primaryItem.filePath]
+                                primarySelectedPath = group.primaryItem.filePath
+                            }
+                            .onTapGesture {
+                                selectedItemPaths = [group.primaryItem.filePath]
+                                primarySelectedPath = group.primaryItem.filePath
+                            }
+                            .draggable(group.items.map(\.filePath).joined(separator: "\n"))
+                            .contextMenu {
+                                Button {
+                                    openedGroupID = group.id
+                                    selectedItemPaths = [group.primaryItem.filePath]
+                                    primarySelectedPath = group.primaryItem.filePath
+                                } label: {
+                                    Label("Open \(group.items.count) Parts", systemImage: "square.stack.3d.up")
+                                }
+
+                                Button {
+                                    Task {
+                                        _ = await slicerService.sendToSlicer(items: group.items)
+                                    }
+                                } label: {
+                                    Label("Send All \(group.items.count) to \(slicerService.defaultProfile.name)", systemImage: "paperplane.fill")
+                                }
+
+                                Divider()
+
+                                Menu("Assign Category to All \(group.items.count)") {
+                                    Button("Uncategorized") {
+                                        for item in group.items { item.category = nil }
+                                        try? modelContext.save()
+                                    }
+                                    Divider()
+                                    ForEach(categories) { category in
+                                        Button {
+                                            for item in group.items { item.category = category }
+                                            try? modelContext.save()
+                                        } label: {
+                                            Label(category.name, systemImage: category.iconName)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .listStyle(.inset(alternatesRowBackgrounds: true))
         }
     }
 
@@ -924,6 +1310,15 @@ struct ContentView: View {
                 }
 
                 Button {
+                    let (removed, moved) = VLMCategorizerService.mergeDuplicateCategories(context: modelContext)
+                    scanner.statusMessage = removed > 0
+                        ? "Merged \(removed) duplicate categor\(removed == 1 ? "y" : "ies") (\(moved) model\(moved == 1 ? "" : "s") moved)."
+                        : "No duplicate categories found."
+                } label: {
+                    Label("Merge Duplicate Categories", systemImage: "arrow.triangle.merge")
+                }
+
+                Button {
                     preferEmbedded3MFThumbnails.toggle()
                     ThumbnailService.shared.preferEmbedded3MFThumbnails = preferEmbedded3MFThumbnails
                     ThumbnailService.shared.clearCache()
@@ -1047,8 +1442,9 @@ struct ContentView: View {
     // MARK: - Bootstrap & File Dialog Helpers
 
     private func bootstrapInitialDataAndScan() async {
-        // Remove any previously indexed unsupported formats (e.g. .obj, .ply)
+        // Remove any previously indexed unsupported formats (e.g. .obj, .ply) and collapse slug duplicate categories
         _ = scanner.pruneUnsupportedFormats(context: modelContext)
+        _ = VLMCategorizerService.mergeDuplicateCategories(context: modelContext)
 
         if categories.isEmpty {
             for (idx, seed) in PrintCategory.defaultSeeds.enumerated() {
