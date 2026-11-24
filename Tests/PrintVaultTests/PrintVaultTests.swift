@@ -625,6 +625,71 @@ struct PrintVaultTests {
         #expect(prompt.contains("ignore cryptic or meaningless filenames"))
     }
 
+    @Test("VLM project context unwraps archive/print-variant folders, omits generic roots, and embeds sibling assembly hints")
+    func vlmProjectAndSiblingContextPrompt() {
+        let watched = ["/Users/tester/Downloads", "/Users/tester/Documents/3D Printing/STL files"]
+
+        // 1. Thingiverse `files/` wrapper -> unwraps to cleaned project name
+        let shavingCtx = ModelGroupingService.meaningfulProjectContext(
+            for: URL(fileURLWithPath: "/Users/tester/Documents/3D Printing/STL files/Shaving_Supplies_Stand__2741048/files/compromise.stl"),
+            watchedFolderPaths: watched
+        )
+        #expect(shavingCtx.projectFolder == "Shaving Supplies Stand")
+        #expect(shavingCtx.ancestorFolder == nil)
+
+        // 2. Print-variant wrapper (`FDM_Multi_Color`) -> unwraps to parent project
+        let terrainCtx = ModelGroupingService.meaningfulProjectContext(
+            for: URL(fileURLWithPath: "/Users/tester/Downloads/Foldable_Terrain_Sample/FDM_Multi_Color/Armored_Sample_Floor_A_Clips_Hinge.3mf"),
+            watchedFolderPaths: watched
+        )
+        #expect(terrainCtx.projectFolder == "Foldable Terrain Sample")
+        #expect(terrainCtx.ancestorFolder == nil)
+
+        // 3. Nested miniature pack preserves meaningful collection ancestor (`4-Environment`)
+        let millCtx = ModelGroupingService.meaningfulProjectContext(
+            for: URL(fileURLWithPath: "/Users/tester/Desktop/models/FreeMiniPack_All/4-Environment/OldMill_32mm_Unsupported/OldMill_32mm_1stWall_FDM.stl"),
+            watchedFolderPaths: watched
+        )
+        #expect(millCtx.projectFolder == "OldMill 32mm")
+        #expect(millCtx.ancestorFolder == "4 Environment")
+
+        // 4. Generic watched folders omit folder noise entirely
+        let looseCtx = ModelGroupingService.meaningfulProjectContext(
+            for: URL(fileURLWithPath: "/Users/tester/Downloads/Gargoyle_Crouching.stl"),
+            watchedFolderPaths: watched
+        )
+        #expect(looseCtx.projectFolder == nil)
+        #expect(looseCtx.ancestorFolder == nil)
+
+        let genericStlCtx = ModelGroupingService.meaningfulProjectContext(
+            for: URL(fileURLWithPath: "/Users/tester/Documents/3D Printing/STL files/car-glasses-clip-v4.stl"),
+            watchedFolderPaths: watched
+        )
+        #expect(genericStlCtx.projectFolder == nil)
+        #expect(genericStlCtx.ancestorFolder == nil)
+
+        // 5. Prompt includes project folder, collection folder, and sibling parts
+        let prompt = VLMCategorizerService.buildClassificationPrompt(
+            fileName: "Handle.stl",
+            parentFolder: "Baby Sword Rattle",
+            ancestorFolder: "Toys",
+            groupTitle: "Baby Sword Rattle",
+            groupPartCount: 6,
+            siblingPartNames: ["Blade_2", "Jewel", "Pommel"],
+            dimensions: "24.0 × 90.0 × 24.0 mm",
+            volumeCm3: 14.2,
+            surfaceAreaCm2: 88.0,
+            triangleCount: 4200,
+            subModelCount: 1,
+            existingCategories: ["Functional Parts", "Cosplay & Props", "Miniatures & Figurines"],
+            allowNewCategories: false
+        )
+        #expect(prompt.contains("- Filename: Handle.stl"))
+        #expect(prompt.contains("- Project folder: Baby Sword Rattle"))
+        #expect(prompt.contains("- Collection folder: Toys"))
+        #expect(prompt.contains("Part of a 6-part model \"Baby Sword Rattle\" (sibling parts: Blade_2, Jewel, Pommel)"))
+    }
+
     // MARK: - Smart Multi-Part Model Grouping
 
     private func makeTestItem(

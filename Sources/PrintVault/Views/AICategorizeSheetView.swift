@@ -18,6 +18,7 @@ struct AICategorizeSheetView: View {
     let allItems: [PrintFileItem]
     let selectedItems: [PrintFileItem]
     let categories: [PrintCategory]
+    var watchedFolderPaths: [String] = []
     let onRunKeywordFallback: () -> Int
 
     private enum PendingCancelAction {
@@ -475,7 +476,9 @@ struct AICategorizeSheetView: View {
                             vlmService.startBatchClassification(
                                 items: targetItems,
                                 existingCategories: categories,
-                                context: modelContext
+                                context: modelContext,
+                                allLibraryItems: allItems,
+                                watchedFolderPaths: watchedFolderPaths
                             )
                         } label: {
                             Label("Analyze \(targetItems.count) Model\(targetItems.count == 1 ? "" : "s")", systemImage: "sparkles")

@@ -233,6 +233,96 @@ public enum ModelGroupingService {
         return orderedEntries.map(\.entry)
     }
 
+    /// Print-variant subfolder names that should be unwrapped when extracting semantic project context for AI classification.
+    private static let printVariantFolderNames: Set<String> = [
+        "fdm", "fdm_monochrome", "fdm_multi_color", "fdm monochrome", "fdm multi color",
+        "resin", "sla", "multicolor", "multi-color", "multi color", "multi_color",
+        "monochrome", "single color", "single_color", "single-color"
+    ]
+
+    /// System/internal ancestor directory names that carry no semantic meaning for 3D model classification.
+    private static let systemNoiseFolderNames: Set<String> = [
+        "users", "library", "application support", "plugins", "presets", "system", "ota",
+        "caches", "var", "private", "tmp", "volumes"
+    ]
+
+    /// Resolves a clean, semantic enclosing project folder (and optional meaningful ancestor folder) for AI classification.
+    /// Unwraps archive wrappers (`files/`, `STLs/`, `FDM_Multi_Color/`) and omits generic/root folders (`Downloads`, `STL files`).
+    public nonisolated static func meaningfulProjectContext(
+        for fileURL: URL,
+        watchedFolderPaths: [String] = []
+    ) -> (projectFolder: String?, ancestorFolder: String?) {
+        let normalizedWatchedRoots = Set(watchedFolderPaths.map { normalizeDirPath($0) })
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let excludedRoots = normalizedWatchedRoots.union([
+            normalizeDirPath(home),
+            normalizeDirPath("\(home)/Downloads"),
+            normalizeDirPath("\(home)/Documents"),
+            normalizeDirPath("\(home)/Desktop")
+        ])
+
+        var dir = fileURL.deletingLastPathComponent()
+
+        // Step up past archive wrappers and print-variant subfolders (up to 3 levels)
+        for _ in 0..<3 {
+            let dirNorm = normalizeDirPath(dir.path)
+            if excludedRoots.contains(dirNorm) || dirNorm == "/" { break }
+            let nameLower = dir.lastPathComponent.lowercased()
+            let isWrapper = wrapperFolderNames.contains(nameLower) || printVariantFolderNames.contains(nameLower)
+            guard isWrapper else { break }
+
+            let parent = dir.deletingLastPathComponent()
+            let parentNorm = normalizeDirPath(parent.path)
+            let parentLower = parent.lastPathComponent.lowercased()
+            if excludedRoots.contains(parentNorm)
+                || genericContainerNames.contains(parentLower)
+                || systemNoiseFolderNames.contains(parentLower)
+                || parentNorm == "/" {
+                break
+            }
+            dir = parent
+        }
+
+        let resolvedNorm = normalizeDirPath(dir.path)
+        let resolvedName = dir.lastPathComponent
+        let resolvedLower = resolvedName.lowercased()
+
+        // If the resolved folder itself is a root, generic dump, wrapper, or system noise dir, return nil
+        if excludedRoots.contains(resolvedNorm)
+            || genericContainerNames.contains(resolvedLower)
+            || wrapperFolderNames.contains(resolvedLower)
+            || printVariantFolderNames.contains(resolvedLower)
+            || systemNoiseFolderNames.contains(resolvedLower)
+            || resolvedNorm == "/" {
+            return (nil, nil)
+        }
+
+        let projectTitle = cleanDisplayTitle(resolvedName)
+
+        // Optionally inspect the immediate parent for a meaningful collection/theme folder (e.g. `4-Environment` or `Terrain`)
+        let parent = dir.deletingLastPathComponent()
+        let parentNorm = normalizeDirPath(parent.path)
+        let parentName = parent.lastPathComponent
+        let parentLower = parentName.lowercased()
+
+        var ancestorTitle: String? = nil
+        if parentNorm != resolvedNorm
+            && parentNorm != "/"
+            && !excludedRoots.contains(parentNorm)
+            && !genericContainerNames.contains(parentLower)
+            && !wrapperFolderNames.contains(parentLower)
+            && !printVariantFolderNames.contains(parentLower)
+            && !systemNoiseFolderNames.contains(parentLower)
+            && parentLower != resolvedLower {
+            let cleaned = cleanDisplayTitle(parentName)
+            if cleaned.lowercased() != projectTitle.lowercased() && cleaned.count >= 3 {
+                ancestorTitle = cleaned
+            }
+        }
+
+        return (projectTitle, ancestorTitle)
+    }
+
     // MARK: - Project Folder Resolution
 
     private static func resolveProjectFolder(

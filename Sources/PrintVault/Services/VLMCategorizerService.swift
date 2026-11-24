@@ -412,7 +412,9 @@ public final class VLMCategorizerService {
 
     public func classifySingleItem(
         _ item: PrintFileItem,
-        existingCategories: [PrintCategory]
+        existingCategories: [PrintCategory],
+        containingGroup: ModelGroup? = nil,
+        watchedFolderPaths: [String] = []
     ) async -> VLMCategorizationSuggestion {
         let start = CFAbsoluteTimeGetCurrent()
         let categoryNames = existingCategories.map(\.name)
@@ -449,9 +451,24 @@ public final class VLMCategorizerService {
             )
         }
 
+        let folderContext = ModelGroupingService.meaningfulProjectContext(
+            for: item.fileURL,
+            watchedFolderPaths: watchedFolderPaths
+        )
+        let siblingNames: [String] = containingGroup.map { group in
+            group.items
+                .filter { $0.filePath != item.filePath }
+                .prefix(6)
+                .map(\.displayTitle)
+        } ?? []
+
         let prompt = Self.buildClassificationPrompt(
             fileName: item.fileName,
-            parentFolder: item.parentFolderName,
+            parentFolder: folderContext.projectFolder ?? "",
+            ancestorFolder: folderContext.ancestorFolder,
+            groupTitle: containingGroup?.title,
+            groupPartCount: containingGroup?.items.count ?? 1,
+            siblingPartNames: siblingNames,
             dimensions: item.formattedDimensions,
             volumeCm3: item.estimatedVolumeCm3,
             surfaceAreaCm2: item.surfaceAreaCm2,
@@ -496,10 +513,24 @@ public final class VLMCategorizerService {
     public func startBatchClassification(
         items: [PrintFileItem],
         existingCategories: [PrintCategory],
-        context: ModelContext
+        context: ModelContext,
+        allLibraryItems: [PrintFileItem]? = nil,
+        watchedFolderPaths: [String] = []
     ) {
         cancelBatch()
         guard !items.isEmpty else { return }
+
+        // Precompute multi-part groups once across the library so each part gets sibling & project assembly context
+        let groupingPool = allLibraryItems ?? items
+        let entries = ModelGroupingService.groupItems(groupingPool, watchedFolderPaths: watchedFolderPaths)
+        var groupByFilePath: [String: ModelGroup] = [:]
+        for entry in entries {
+            if case .group(let group) = entry {
+                for member in group.items {
+                    groupByFilePath[member.filePath] = group
+                }
+            }
+        }
 
         isRunning = true
         completedCount = 0
@@ -512,7 +543,12 @@ public final class VLMCategorizerService {
             for item in items {
                 if Task.isCancelled { break }
                 self.currentItemName = item.displayTitle
-                var suggestion = await self.classifySingleItem(item, existingCategories: existingCategories)
+                var suggestion = await self.classifySingleItem(
+                    item,
+                    existingCategories: existingCategories,
+                    containingGroup: groupByFilePath[item.filePath],
+                    watchedFolderPaths: watchedFolderPaths
+                )
 
                 // Auto-apply high-confidence matches immediately when enabled
                 if self.config.autoApplyHighConfidence,
@@ -749,6 +785,10 @@ public final class VLMCategorizerService {
     public nonisolated static func buildClassificationPrompt(
         fileName: String,
         parentFolder: String,
+        ancestorFolder: String? = nil,
+        groupTitle: String? = nil,
+        groupPartCount: Int = 1,
+        siblingPartNames: [String] = [],
         dimensions: String,
         volumeCm3: Double,
         surfaceAreaCm2: Double,
@@ -771,12 +811,24 @@ public final class VLMCategorizerService {
         if surfaceAreaCm2 > 0 { metricsLines.append(String(format: "- Surface Area: %.1f cm²", surfaceAreaCm2)) }
         if triangleCount > 0 { metricsLines.append("- Triangles: \(triangleCount)") }
         if subModelCount > 1 { metricsLines.append("- Sub-Models on plate: \(subModelCount)") }
-        metricsLines.append("- Filename (secondary hint only): \(fileName)")
-        if !parentFolder.isEmpty { metricsLines.append("- Parent folder: \(parentFolder)") }
+        metricsLines.append("- Filename: \(fileName)")
+        if !parentFolder.isEmpty {
+            metricsLines.append("- Project folder: \(parentFolder)")
+        }
+        if let ancestorFolder, !ancestorFolder.isEmpty {
+            metricsLines.append("- Collection folder: \(ancestorFolder)")
+        }
+        if groupPartCount > 1 {
+            let groupLabel = (groupTitle?.isEmpty == false ? groupTitle! : parentFolder)
+            let siblingSnippet = siblingPartNames.isEmpty
+                ? ""
+                : " (sibling parts: \(siblingPartNames.joined(separator: ", ")))"
+            metricsLines.append("- Multi-part assembly: Part of a \(groupPartCount)-part model \"\(groupLabel)\"\(siblingSnippet)")
+        }
 
         return """
-        You are classifying a 3D printable model from its neutral-gray 3D studio render and geometry metadata.
-        Rely primarily on the visual 3D shape and physical scale in millimeters; treat the filename only as secondary context (ignore cryptic or meaningless filenames).
+        You are classifying a 3D printable model from its neutral-gray 3D studio render, physical geometry metadata, and enclosing project context.
+        Combine the visual 3D shape, physical scale in millimeters, and any meaningful project folder or multi-part assembly context. When an individual part (such as a handle, clip, lid, wall, or base) belongs to a named multi-part project, classify it under the overall model's category rather than as an isolated generic part; ignore cryptic or meaningless filenames.
 
         Model metadata:
         \(metricsLines.joined(separator: "\n"))

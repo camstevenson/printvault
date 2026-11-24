@@ -336,6 +336,7 @@ struct ContentView: View {
                         onOpenSlicerSettings: { showSlicerSettings = true },
                         onOpenAICategorize: { showAICategorizeSheet = true },
                         containingGroup: activeItemGroup,
+                        watchedFolderPaths: watchedFolders.map(\.path),
                         onSelectSiblingPart: { sibling in
                             selectedItemPaths = [sibling.filePath]
                             primarySelectedPath = sibling.filePath
@@ -374,6 +375,7 @@ struct ContentView: View {
                 allItems: allItems,
                 selectedItems: resolveSelectedItems(in: displayedItems),
                 categories: categories,
+                watchedFolderPaths: watchedFolders.map(\.path),
                 onRunKeywordFallback: {
                     let count = scanner.autoCategorizeUncategorized(context: modelContext)
                     scanner.statusMessage = "Keyword rules categorized \(count) model(s)."

@@ -11,6 +11,7 @@ struct InspectorPaneView: View {
     let onOpenSlicerSettings: () -> Void
     let onOpenAICategorize: () -> Void
     var containingGroup: ModelGroup? = nil
+    var watchedFolderPaths: [String] = []
     var onSelectSiblingPart: ((PrintFileItem) -> Void)? = nil
     var onOpenGroup: (() -> Void)? = nil
 
@@ -568,7 +569,12 @@ struct InspectorPaneView: View {
                 return
             }
 
-            let suggestion = await vlmService.classifySingleItem(targetItem, existingCategories: categories)
+            let suggestion = await vlmService.classifySingleItem(
+                targetItem,
+                existingCategories: categories,
+                containingGroup: containingGroup,
+                watchedFolderPaths: watchedFolderPaths
+            )
             if let err = suggestion.errorMessage {
                 aiFeedbackText = err
                 return
