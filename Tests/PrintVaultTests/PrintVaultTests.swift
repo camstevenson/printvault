@@ -606,6 +606,62 @@ struct PrintVaultTests {
         #expect(remainingCats.count == 2)
     }
 
+    @Test("clearAllOrganizationMetadata wipes categories, tags, and notes while preserving indexed models and optional default seeds")
+    @MainActor
+    func clearAllOrganizationMetadataTest() throws {
+        let schema = Schema([PrintFileItem.self, PrintCategory.self, WatchedFolder.self])
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
+        )
+        let ctx = container.mainContext
+
+        let catA = PrintCategory(name: "Custom Category", sortOrder: 0)
+        let catB = PrintCategory(name: "Functional Parts", sortOrder: 1)
+        ctx.insert(catA)
+        ctx.insert(catB)
+
+        let item = PrintFileItem(
+            filePath: "/tmp/gear.stl",
+            fileName: "gear.stl",
+            fileExtension: "stl",
+            fileSize: 2048,
+            dateModified: Date(),
+            category: catA,
+            tags: ["pla", "gear"]
+        )
+        item.notes = "Print at 0.2mm"
+        item.isFavorite = true
+        item.triangleCount = 500
+        ctx.insert(item)
+        try ctx.save()
+
+        let scanner = FileScannerService()
+
+        // 1. Clear everything with no categories restored
+        let (cleared1, deleted1) = scanner.clearAllOrganizationMetadata(context: ctx, restoreDefaultCategories: false)
+        #expect(cleared1 == 1)
+        #expect(deleted1 == 2)
+        #expect(item.category == nil)
+        #expect(item.tags.isEmpty)
+        #expect(item.notes.isEmpty)
+        #expect(item.isFavorite == true)
+        #expect(item.triangleCount == 500)
+        #expect(try ctx.fetch(FetchDescriptor<PrintCategory>()).isEmpty)
+        #expect(try ctx.fetch(FetchDescriptor<PrintFileItem>()).count == 1)
+
+        // 2. Clear and restore default categories
+        item.tags = ["temp"]
+        item.notes = "Temporary"
+        try ctx.save()
+
+        let (cleared2, _) = scanner.clearAllOrganizationMetadata(context: ctx, restoreDefaultCategories: true)
+        #expect(cleared2 == 1)
+        #expect(item.tags.isEmpty)
+        #expect(item.notes.isEmpty)
+        #expect(try ctx.fetch(FetchDescriptor<PrintCategory>()).count == PrintCategory.defaultSeeds.count)
+    }
+
     @Test("VLM prompt embeds physical dimensions, geometry stats, and existing categories")
     func vlmPromptConstruction() {
         let prompt = VLMCategorizerService.buildClassificationPrompt(

@@ -464,6 +464,50 @@ public final class FileScannerService {
         )
     }
 
+    /// Clears all category assignments, tags, and notes from every indexed model and deletes all categories.
+    /// Optionally restores the default category seeds immediately. Never modifies or deletes 3D files on disk.
+    @discardableResult
+    public func clearAllOrganizationMetadata(
+        context: ModelContext,
+        restoreDefaultCategories: Bool = false
+    ) -> (clearedItems: Int, deletedCategories: Int) {
+        let items = (try? context.fetch(FetchDescriptor<PrintFileItem>())) ?? []
+        var clearedItems = 0
+        for item in items {
+            let hadMetadata = item.category != nil || !item.tags.isEmpty || !item.notes.isEmpty
+            item.category = nil
+            item.tags = []
+            item.notes = ""
+            if hadMetadata {
+                clearedItems += 1
+            }
+        }
+
+        let existingCategories = (try? context.fetch(FetchDescriptor<PrintCategory>())) ?? []
+        let deletedCategories = existingCategories.count
+        for category in existingCategories {
+            context.delete(category)
+        }
+
+        if restoreDefaultCategories {
+            for (idx, seed) in PrintCategory.defaultSeeds.enumerated() {
+                let cat = PrintCategory(
+                    name: seed.name,
+                    iconName: seed.icon,
+                    colorHex: seed.hex,
+                    sortOrder: idx
+                )
+                context.insert(cat)
+            }
+        }
+
+        try? context.save()
+        statusMessage = restoreDefaultCategories
+            ? "Cleared metadata on \(clearedItems) model(s) and restored \(PrintCategory.defaultSeeds.count) default categories."
+            : "Cleared metadata on \(clearedItems) model(s) and removed \(deletedCategories) categor\(deletedCategories == 1 ? "y" : "ies")."
+        return (clearedItems, deletedCategories)
+    }
+
     public nonisolated static func shouldSkipPath(_ path: String) -> Bool {
         let ignoredSegments = [
             "/.Trash/",

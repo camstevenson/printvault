@@ -73,6 +73,7 @@ struct ContentView: View {
     @State private var showSlicerSettings: Bool = false
     @State private var showAICategorizeSheet: Bool = false
     @State private var showCategorySheet: Bool = false
+    @State private var showClearMetadataConfirmation: Bool = false
     @State private var editingCategory: PrintCategory?
     @State private var categoryNameDraft: String = ""
     @State private var categoryIconDraft: String = "cube.box.fill"
@@ -388,6 +389,17 @@ struct ContentView: View {
         }
         .sheet(item: $expandedPreviewItem) { item in
             ExpandedPreview3DSheet(item: item, slicerService: slicerService)
+        }
+        .alert("Clear All Categories, Tags & Notes?", isPresented: $showClearMetadataConfirmation) {
+            Button("Clear All & Restore Default Categories", role: .destructive) {
+                performClearAllOrganizationMetadata(restoreDefaults: true)
+            }
+            Button("Clear Everything (No Categories)", role: .destructive) {
+                performClearAllOrganizationMetadata(restoreDefaults: false)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will clear category assignments, tags, and notes across \(allItems.count) model\(allItems.count == 1 ? "" : "s") and delete all \(categories.count) categor\(categories.count == 1 ? "y" : "ies"). Your 3D files on disk will not be modified or deleted.")
         }
         .onReceive(NotificationCenter.default.publisher(for: .printVaultScanFiles)) { _ in
             Task {
@@ -1427,6 +1439,15 @@ struct ContentView: View {
                 } label: {
                     Label("Clear Thumbnail Cache", systemImage: "photo.stack")
                 }
+
+                Divider()
+
+                Button(role: .destructive) {
+                    showClearMetadataConfirmation = true
+                } label: {
+                    Label("Clear All Categories, Tags & Notes...", systemImage: "trash")
+                }
+                .disabled(allItems.isEmpty && categories.isEmpty)
             } label: {
                 Label("Library Tools", systemImage: "ellipsis.circle")
             }
@@ -1450,6 +1471,21 @@ struct ContentView: View {
     }
 
     // MARK: - Create / Edit Category Sheet
+
+    private func performClearAllOrganizationMetadata(restoreDefaults: Bool) {
+        vlmService.cancelBatch()
+        vlmService.suggestions = []
+        if case .category = sidebarFilter {
+            sidebarFilter = .all
+        } else if case .tag = sidebarFilter {
+            sidebarFilter = .all
+        }
+        openedGroupID = nil
+        _ = scanner.clearAllOrganizationMetadata(
+            context: modelContext,
+            restoreDefaultCategories: restoreDefaults
+        )
+    }
 
     private func beginCreateCategory() {
         editingCategory = nil
