@@ -2,6 +2,7 @@ import Foundation
 import SwiftData
 import AppKit
 import Observation
+import os
 
 // MARK: - VLM Backend & Configuration
 
@@ -99,6 +100,7 @@ public final class VLMCategorizerService {
     public static let shared = VLMCategorizerService()
     public static let recommendedOllamaVisionModel = "qwen2.5vl:3b"
 
+    private static let logger = Logger(subsystem: "com.printvault.PrintVault", category: "VLMCategorizer")
     private let configDefaultsKey = "PrintVault.VLMConfig.v1"
 
     public var config: VLMConfiguration = VLMConfiguration()
@@ -121,6 +123,15 @@ public final class VLMCategorizerService {
 
     private var activeTask: Task<Void, Never>?
     private var pullTask: Task<Void, Never>?
+    private var detectGeneration: Int = 0
+    private var pullGeneration: Int = 0
+    private var batchGeneration: Int = 0
+    private let probeSession: URLSession = {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = 2.5
+        cfg.timeoutIntervalForResource = 2.5
+        return URLSession(configuration: cfg)
+    }()
 
     public init(loadPersisted: Bool = true) {
         if loadPersisted {
@@ -187,14 +198,19 @@ public final class VLMCategorizerService {
     // MARK: - Auto-Detection & Ollama Startup / Model Pull
 
     public func detectLocalRuntimes(preferCurrentBackend: Bool = false) async {
+        detectGeneration += 1
+        let gen = detectGeneration
         connectionState = .checking
         lastError = nil
 
         if preferCurrentBackend {
-            if await probeBackend(config.backend, baseURL: config.baseURL) {
+            if let names = await fetchModels(kind: config.backend, baseURL: config.baseURL) {
+                guard gen == detectGeneration, !Task.isCancelled else { return }
+                applyDetectedModels(names, kind: config.backend)
                 saveConfiguration()
                 return
             }
+            guard gen == detectGeneration, !Task.isCancelled else { return }
         }
 
         // Try Ollama first, then LM Studio, then Custom/MLX-VLM
@@ -207,16 +223,20 @@ public final class VLMCategorizerService {
 
         var seen = Set<String>()
         for (kind, url) in order {
+            guard gen == detectGeneration, !Task.isCancelled else { return }
             let key = "\(kind.rawValue)|\(url)"
             guard seen.insert(key).inserted else { continue }
-            if await probeBackend(kind, baseURL: url) {
+            if let names = await fetchModels(kind: kind, baseURL: url) {
+                guard gen == detectGeneration, !Task.isCancelled else { return }
                 config.backend = kind
                 config.baseURL = url
+                applyDetectedModels(names, kind: kind)
                 saveConfiguration()
                 return
             }
         }
 
+        guard gen == detectGeneration, !Task.isCancelled else { return }
         availableModels = []
         availableVisionModels = []
         connectionState = .offline(
@@ -225,44 +245,38 @@ public final class VLMCategorizerService {
         )
     }
 
-    private func probeBackend(_ kind: VLMBackendKind, baseURL: String) async -> Bool {
+    private func fetchModels(kind: VLMBackendKind, baseURL: String) async -> [String]? {
         let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        guard !trimmed.isEmpty else { return false }
-
-        let session = makeShortTimeoutSession(seconds: 2.5)
+        guard !trimmed.isEmpty else { return nil }
 
         switch kind {
         case .ollama:
-            guard let url = URL(string: "\(trimmed)/api/tags") else { return false }
-            guard let (data, resp) = try? await session.data(from: url),
+            guard let url = URL(string: "\(trimmed)/api/tags") else { return nil }
+            guard let (data, resp) = try? await probeSession.data(from: url),
                   let http = resp as? HTTPURLResponse,
                   (200...299).contains(http.statusCode) else {
-                return false
+                return nil
             }
             struct OllamaTagsResponse: Decodable {
                 struct Model: Decodable { let name: String }
                 let models: [Model]?
             }
             let decoded = try? JSONDecoder().decode(OllamaTagsResponse.self, from: data)
-            let names = (decoded?.models ?? []).map(\.name)
-            applyDetectedModels(names, kind: .ollama)
-            return true
+            return (decoded?.models ?? []).map(\.name)
 
         case .lmStudio, .customOpenAI:
-            guard let url = URL(string: "\(trimmed)/models") else { return false }
-            guard let (data, resp) = try? await session.data(from: url),
+            guard let url = URL(string: "\(trimmed)/models") else { return nil }
+            guard let (data, resp) = try? await probeSession.data(from: url),
                   let http = resp as? HTTPURLResponse,
                   (200...299).contains(http.statusCode) else {
-                return false
+                return nil
             }
             struct OpenAIModelsResponse: Decodable {
                 struct Model: Decodable { let id: String }
                 let data: [Model]?
             }
             let decoded = try? JSONDecoder().decode(OpenAIModelsResponse.self, from: data)
-            let names = (decoded?.data ?? []).map(\.id)
-            applyDetectedModels(names, kind: kind)
-            return true
+            return (decoded?.data ?? []).map(\.id)
         }
     }
 
@@ -314,10 +328,13 @@ public final class VLMCategorizerService {
         }
 
         for _ in 0..<8 {
-            try? await Task.sleep(nanoseconds: 500_000_000)
-            if await probeBackend(.ollama, baseURL: VLMBackendKind.ollama.defaultBaseURL) {
+            if Task.isCancelled { return }
+            try? await Task.sleep(for: .milliseconds(500))
+            if let names = await fetchModels(kind: .ollama, baseURL: VLMBackendKind.ollama.defaultBaseURL) {
+                detectGeneration += 1
                 config.backend = .ollama
                 config.baseURL = VLMBackendKind.ollama.defaultBaseURL
+                applyDetectedModels(names, kind: .ollama)
                 saveConfiguration()
                 return
             }
@@ -329,20 +346,23 @@ public final class VLMCategorizerService {
     public func pullOllamaModel(_ modelName: String = recommendedOllamaVisionModel) {
         guard !isPullingModel else { return }
         pullTask?.cancel()
+        pullGeneration += 1
+        let gen = pullGeneration
         pullTask = Task { [weak self] in
             guard let self else { return }
-            await self.performPullOllamaModel(modelName)
+            await self.performPullOllamaModel(modelName, generation: gen)
         }
     }
 
     public func cancelPull() {
+        pullGeneration += 1
         pullTask?.cancel()
         pullTask = nil
         isPullingModel = false
         pullStatusText = ""
     }
 
-    private func performPullOllamaModel(_ modelName: String) async {
+    private func performPullOllamaModel(_ modelName: String, generation: Int) async {
         let base = config.baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard let url = URL(string: "\(base)/api/pull") else { return }
 
@@ -352,7 +372,9 @@ public final class VLMCategorizerService {
         lastError = nil
 
         defer {
-            isPullingModel = false
+            if generation == pullGeneration {
+                isPullingModel = false
+            }
         }
 
         var req = URLRequest(url: url)
@@ -370,13 +392,14 @@ public final class VLMCategorizerService {
 
         do {
             let (bytes, response) = try await URLSession.shared.bytes(for: req)
+            guard generation == pullGeneration, !Task.isCancelled else { return }
             guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
                 lastError = "Ollama returned an error starting model pull."
                 return
             }
 
             for try await line in bytes.lines {
-                if Task.isCancelled { return }
+                guard generation == pullGeneration, !Task.isCancelled else { return }
                 guard let lineData = line.data(using: .utf8),
                       let chunk = try? JSONDecoder().decode(PullChunk.self, from: lineData) else {
                     continue
@@ -393,7 +416,7 @@ public final class VLMCategorizerService {
                 }
             }
 
-            if Task.isCancelled { return }
+            guard generation == pullGeneration, !Task.isCancelled else { return }
             pullProgress = 1.0
             pullStatusText = "Downloaded \(modelName)"
             config.selectedModel = modelName
@@ -402,7 +425,7 @@ public final class VLMCategorizerService {
         } catch is CancellationError {
             return
         } catch {
-            if !Task.isCancelled {
+            if generation == pullGeneration && !Task.isCancelled {
                 lastError = "Failed to pull \(modelName): \(error.localizedDescription)"
             }
         }
@@ -410,13 +433,18 @@ public final class VLMCategorizerService {
 
     // MARK: - Single & Batch VLM Classification
 
+    private nonisolated static func elapsedSeconds(since start: ContinuousClock.Instant) -> Double {
+        let duration = start.duration(to: .now)
+        return Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
+    }
+
     public func classifySingleItem(
         _ item: PrintFileItem,
         existingCategories: [PrintCategory],
         containingGroup: ModelGroup? = nil,
         watchedFolderPaths: [String] = []
     ) async -> VLMCategorizationSuggestion {
-        let start = CFAbsoluteTimeGetCurrent()
+        let start = ContinuousClock.now
         let categoryNames = existingCategories.map(\.name)
 
         guard !config.selectedModel.isEmpty else {
@@ -446,7 +474,7 @@ public final class VLMCategorizerService {
                 tags: [],
                 summary: "",
                 isSelected: false,
-                elapsedSeconds: CFAbsoluteTimeGetCurrent() - start,
+                elapsedSeconds: Self.elapsedSeconds(since: start),
                 errorMessage: "Could not render 3D preview image."
             )
         }
@@ -483,7 +511,7 @@ public final class VLMCategorizerService {
                 imagePNGData: pngData,
                 prompt: prompt
             )
-            let elapsed = CFAbsoluteTimeGetCurrent() - start
+            let elapsed = Self.elapsedSeconds(since: start)
             return Self.parseSuggestion(
                 from: rawResponse,
                 itemFilePath: item.filePath,
@@ -504,7 +532,7 @@ public final class VLMCategorizerService {
                 tags: [],
                 summary: "",
                 isSelected: false,
-                elapsedSeconds: CFAbsoluteTimeGetCurrent() - start,
+                elapsedSeconds: Self.elapsedSeconds(since: start),
                 errorMessage: error.localizedDescription
             )
         }
@@ -532,6 +560,9 @@ public final class VLMCategorizerService {
             }
         }
 
+        batchGeneration += 1
+        let gen = batchGeneration
+
         isRunning = true
         completedCount = 0
         totalCount = items.count
@@ -540,21 +571,35 @@ public final class VLMCategorizerService {
 
         activeTask = Task { [weak self] in
             guard let self else { return }
+            defer {
+                if gen == self.batchGeneration {
+                    self.currentItemName = ""
+                    self.isRunning = false
+                }
+            }
+
             for item in items {
-                if Task.isCancelled { break }
+                guard !Task.isCancelled, gen == self.batchGeneration else { break }
                 self.currentItemName = item.displayTitle
+
+                // Refresh live categories so newly auto-created categories are visible to subsequent VLM prompts
+                let liveCategories = (try? context.fetch(FetchDescriptor<PrintCategory>(sortBy: [SortDescriptor(\.sortOrder)]))) ?? existingCategories
+
                 var suggestion = await self.classifySingleItem(
                     item,
-                    existingCategories: existingCategories,
+                    existingCategories: liveCategories,
                     containingGroup: groupByFilePath[item.filePath],
                     watchedFolderPaths: watchedFolderPaths
                 )
 
+                guard !Task.isCancelled, gen == self.batchGeneration else { break }
+
                 // Auto-apply high-confidence matches immediately when enabled
                 if self.config.autoApplyHighConfidence,
                    suggestion.errorMessage == nil,
+                   suggestion.suggestedCategoryName != "Uncategorized",
                    suggestion.confidence >= self.config.confidenceThreshold {
-                    let currentCats = (try? context.fetch(FetchDescriptor<PrintCategory>())) ?? existingCategories
+                    let currentCats = (try? context.fetch(FetchDescriptor<PrintCategory>(sortBy: [SortDescriptor(\.sortOrder)]))) ?? liveCategories
                     let applied = self.applySingleSuggestion(suggestion, to: item, existingCategories: currentCats, context: context)
                     if applied {
                         suggestion.isApplied = true
@@ -569,15 +614,18 @@ public final class VLMCategorizerService {
                 }
             }
 
-            if self.config.autoApplyHighConfidence {
-                try? context.save()
+            if gen == self.batchGeneration && self.config.autoApplyHighConfidence {
+                do {
+                    try context.save()
+                } catch {
+                    Self.logger.error("Failed to save auto-applied VLM suggestions: \(error.localizedDescription, privacy: .public)")
+                }
             }
-            self.currentItemName = ""
-            self.isRunning = false
         }
     }
 
     public func cancelBatch() {
+        batchGeneration += 1
         activeTask?.cancel()
         activeTask = nil
         isRunning = false
@@ -773,13 +821,6 @@ public final class VLMCategorizerService {
         }
     }
 
-    private func makeShortTimeoutSession(seconds: TimeInterval) -> URLSession {
-        let cfg = URLSessionConfiguration.ephemeral
-        cfg.timeoutIntervalForRequest = seconds
-        cfg.timeoutIntervalForResource = seconds
-        return URLSession(configuration: cfg)
-    }
-
     // MARK: - Prompt Builder & Robust JSON Parser
 
     public nonisolated static func buildClassificationPrompt(
@@ -906,12 +947,11 @@ public final class VLMCategorizerService {
         } else if allowNewCategories && !rawCategory.isEmpty && rawCategory.caseInsensitiveCompare("Uncategorized") != .orderedSame {
             finalCategoryName = formatCategoryDisplayName(rawCategory)
             isNew = true
-        } else if let fallback = existingCategories.first, !rawCategory.isEmpty {
-            finalCategoryName = fallback.name
-            isNew = false
         } else {
-            finalCategoryName = rawCategory.isEmpty ? "Uncategorized" : formatCategoryDisplayName(rawCategory)
-            isNew = matchedCat == nil && allowNewCategories
+            // Unrecognized category when new categories are disallowed: leave uncategorized & unselected
+            // so the user can review manually instead of misclassifying under an arbitrary first category.
+            finalCategoryName = "Uncategorized"
+            isNew = false
         }
 
         // Clean & deduplicate tags (max 5)

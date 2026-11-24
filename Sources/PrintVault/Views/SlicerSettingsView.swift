@@ -66,7 +66,10 @@ struct SlicerSettingsView: View {
                                 SlicerProfileRow(
                                     profile: $profile,
                                     isDefault: slicerService.defaultSlicerId == profile.id,
-                                    detectionTick: slicerService.detectionRefreshCount,
+                                    isInstalled: slicerService.isInstalled(profile),
+                                    onPathChanged: { updated in
+                                        slicerService.refreshInstallationStatus(for: updated)
+                                    },
                                     onSetDefault: {
                                         slicerService.defaultSlicerId = profile.id
                                         slicerService.saveConfiguration()
@@ -259,6 +262,12 @@ struct SlicerSettingsView: View {
             }
         }
         .frame(width: 700, height: 640)
+        .onChange(of: slicerService.profiles) { _, _ in
+            slicerService.saveConfiguration()
+        }
+        .onChange(of: slicerService.hookConfig) { _, _ in
+            slicerService.saveConfiguration()
+        }
         .onDisappear {
             slicerService.saveConfiguration()
         }
@@ -333,12 +342,12 @@ struct SlicerSettingsView: View {
 private struct SlicerProfileRow: View {
     @Binding var profile: SlicerProfile
     let isDefault: Bool
-    let detectionTick: Int
+    let isInstalled: Bool
+    let onPathChanged: (SlicerProfile) -> Void
     let onSetDefault: () -> Void
     let onDelete: () -> Void
 
     var body: some View {
-        let _ = detectionTick
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 10) {
                 Image(systemName: profile.iconSystemName)
@@ -351,7 +360,7 @@ private struct SlicerProfileRow: View {
                         Text(profile.name)
                             .font(.subheadline.weight(.semibold))
 
-                        if profile.isInstalled {
+                        if isInstalled {
                             Text("Detected")
                                 .font(.caption2.weight(.medium))
                                 .padding(.horizontal, 6)
@@ -384,6 +393,9 @@ private struct SlicerProfileRow: View {
                         TextField("App Path", text: $profile.appPath)
                             .textFieldStyle(.roundedBorder)
                             .font(.caption)
+                            .onChange(of: profile.appPath) { _, _ in
+                                onPathChanged(profile)
+                            }
                         Button("Locate...") {
                             let panel = NSOpenPanel()
                             panel.canChooseFiles = true

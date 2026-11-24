@@ -1,6 +1,7 @@
 import Foundation
 import SwiftData
 import Observation
+import os
 
 // MARK: - Discovered Candidate
 
@@ -19,6 +20,8 @@ public struct DiscoveredFileCandidate: Sendable {
 @MainActor
 @Observable
 public final class FileScannerService {
+    private static let logger = Logger(subsystem: "com.printvault.PrintVault", category: "FileScanner")
+
     public var isScanningSpotlight: Bool = false
     public var isScanningFolders: Bool = false
     public var isAnalyzingMeshes: Bool = false
@@ -32,6 +35,15 @@ public final class FileScannerService {
 
     public var isBusy: Bool {
         isScanningSpotlight || isScanningFolders
+    }
+
+    private func saveContext(_ context: ModelContext, operation: String) {
+        do {
+            try context.save()
+        } catch {
+            Self.logger.error("Failed to save SwiftData context during \(operation, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            statusMessage = "Save error during \(operation): \(error.localizedDescription)"
+        }
     }
 
     // MARK: - Folder Path Boundary Helper
@@ -58,22 +70,30 @@ public final class FileScannerService {
     public func scanWatchedFolders(context: ModelContext) async {
         guard !isScanningFolders else { return }
         isScanningFolders = true
+        defer { isScanningFolders = false }
         statusMessage = "Scanning watched folders..."
 
         let descriptor = FetchDescriptor<WatchedFolder>(
             predicate: #Predicate { $0.isEnabled == true }
         )
-        let folders = (try? context.fetch(descriptor)) ?? []
+        let folders: [WatchedFolder]
+        do {
+            folders = try context.fetch(descriptor)
+        } catch {
+            Self.logger.error("Failed to fetch watched folders: \(error.localizedDescription, privacy: .public)")
+            statusMessage = "Failed to load watched folders."
+            return
+        }
 
         var totalAdded = 0
         for folder in folders {
+            if Task.isCancelled { break }
             let folderURL = folder.url
             guard FileManager.default.fileExists(atPath: folder.path) else { continue }
             statusMessage = "Scanning \(folder.displayName)..."
 
-            let candidates = await Task.detached(priority: .utility) {
-                Self.enumerateFolderRecursively(at: folderURL, source: .watchedFolder)
-            }.value
+            let candidates = await Self.enumerateFolderRecursivelyAsync(at: folderURL, source: .watchedFolder)
+            if Task.isCancelled { break }
 
             folder.lastScannedAt = Date()
             folder.discoveredFileCount = candidates.count
@@ -82,9 +102,8 @@ public final class FileScannerService {
             totalAdded += added
         }
 
-        try? context.save()
+        saveContext(context, operation: "watched folder scan")
         lastScanNewCount += totalAdded
-        isScanningFolders = false
         statusMessage = totalAdded > 0
             ? "Added \(totalAdded) new 3D model(s) from folders."
             : "Watched folders up to date."
@@ -95,6 +114,10 @@ public final class FileScannerService {
     public func runSpotlightQuery(context: ModelContext, timeoutSeconds: Double = 15.0) async {
         guard !isScanningSpotlight else { return }
         isScanningSpotlight = true
+        defer {
+            isScanningSpotlight = false
+            self.metadataQuery = nil
+        }
         statusMessage = "Searching macOS Spotlight for .stl and .3mf files..."
 
         let query = NSMetadataQuery()
@@ -106,88 +129,108 @@ public final class FileScannerService {
 
         var rawItems: [(path: String, size: Int64, modDate: Date)] = []
 
-        if query.start() {
-            // Race Spotlight finish notification against a timeout on MainActor without crossing Sendable boundaries
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                @MainActor
-                final class WaitState {
-                    var hasResumed = false
-                    var observer: NSObjectProtocol?
-                    var timeoutTask: Task<Void, Never>?
+        if !Task.isCancelled && query.start() {
+            @MainActor
+            final class WaitState {
+                var hasResumed = false
+                var query: NSMetadataQuery?
+                var observer: NSObjectProtocol?
+                var timeoutTask: Task<Void, Never>?
+                var continuation: CheckedContinuation<Void, Never>?
 
-                    func finish(_ continuation: CheckedContinuation<Void, Never>) {
-                        guard !hasResumed else { return }
-                        hasResumed = true
-                        if let observer {
-                            NotificationCenter.default.removeObserver(observer)
-                        }
-                        observer = nil
-                        timeoutTask?.cancel()
-                        timeoutTask = nil
+                init(query: NSMetadataQuery) {
+                    self.query = query
+                }
+
+                func finish(stopQuery: Bool = false) {
+                    guard !hasResumed else { return }
+                    hasResumed = true
+                    if stopQuery {
+                        query?.disableUpdates()
+                        query?.stop()
+                    }
+                    query = nil
+                    if let observer {
+                        NotificationCenter.default.removeObserver(observer)
+                    }
+                    observer = nil
+                    timeoutTask?.cancel()
+                    timeoutTask = nil
+                    let cont = continuation
+                    continuation = nil
+                    cont?.resume()
+                }
+            }
+
+            let state = WaitState(query: query)
+
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    if Task.isCancelled {
+                        state.query = nil
                         continuation.resume()
+                        return
+                    }
+                    state.continuation = continuation
+                    state.observer = NotificationCenter.default.addObserver(
+                        forName: .NSMetadataQueryDidFinishGathering,
+                        object: query,
+                        queue: .main
+                    ) { _ in
+                        MainActor.assumeIsolated {
+                            state.finish()
+                        }
+                    }
+
+                    state.timeoutTask = Task { @MainActor in
+                        try? await Task.sleep(for: .seconds(timeoutSeconds))
+                        state.finish()
                     }
                 }
-
-                let state = WaitState()
-                state.observer = NotificationCenter.default.addObserver(
-                    forName: .NSMetadataQueryDidFinishGathering,
-                    object: query,
-                    queue: .main
-                ) { _ in
-                    MainActor.assumeIsolated {
-                        state.finish(continuation)
-                    }
-                }
-
-                state.timeoutTask = Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000))
-                    state.finish(continuation)
+            } onCancel: {
+                Task { @MainActor in
+                    state.finish(stopQuery: true)
                 }
             }
 
             query.disableUpdates()
             query.stop()
 
-            let count = min(query.resultCount, 2500)
-            rawItems.reserveCapacity(count)
-            for i in 0..<count {
-                guard let item = query.result(at: i) as? NSMetadataItem,
-                      let path = item.value(forAttribute: NSMetadataItemPathKey) as? String else {
-                    continue
-                }
-                if Self.shouldSkipPath(path) { continue }
-                let ext = (path as NSString).pathExtension.lowercased()
-                guard PrintFileFormat.supportedExtensions.contains(ext) else { continue }
+            if !Task.isCancelled {
+                let count = min(query.resultCount, 2500)
+                rawItems.reserveCapacity(count)
+                for i in 0..<count {
+                    guard let item = query.result(at: i) as? NSMetadataItem,
+                          let path = item.value(forAttribute: NSMetadataItemPathKey) as? String else {
+                        continue
+                    }
+                    if Self.shouldSkipPath(path) { continue }
+                    let ext = (path as NSString).pathExtension.lowercased()
+                    guard PrintFileFormat.supportedExtensions.contains(ext) else { continue }
 
-                let size = (item.value(forAttribute: NSMetadataItemFSSizeKey) as? NSNumber)?.int64Value ?? 0
-                let modDate = (item.value(forAttribute: NSMetadataItemFSContentChangeDateKey) as? Date) ?? Date()
-                rawItems.append((path, size, modDate))
+                    let size = (item.value(forAttribute: NSMetadataItemFSSizeKey) as? NSNumber)?.int64Value ?? 0
+                    let modDate = (item.value(forAttribute: NSMetadataItemFSContentChangeDateKey) as? Date) ?? Date()
+                    rawItems.append((path, size, modDate))
+                }
             }
         }
         self.metadataQuery = nil
 
-        // Read Finder tags off the main actor
-        let capturedRaw = rawItems
-        let candidates: [DiscoveredFileCandidate] = await Task.detached(priority: .utility) {
-            capturedRaw.map { entry in
-                let url = URL(fileURLWithPath: entry.path)
-                let tags = FinderTagService.readTags(for: url)
-                return DiscoveredFileCandidate(
-                    filePath: entry.path,
-                    fileName: url.lastPathComponent,
-                    fileExtension: url.pathExtension.lowercased(),
-                    fileSize: entry.size,
-                    dateModified: entry.modDate,
-                    source: .spotlight,
-                    finderTags: tags
-                )
-            }
-        }.value
+        guard !Task.isCancelled else {
+            statusMessage = "Spotlight scan cancelled."
+            return
+        }
+
+        // Read Finder tags off the main actor while cooperating with cancellation
+        let candidates = await Self.buildSpotlightCandidatesAsync(from: rawItems)
+        guard !Task.isCancelled else {
+            statusMessage = "Spotlight scan cancelled."
+            return
+        }
 
         let added = ingestCandidates(candidates, into: context)
-        try? context.save()
+        saveContext(context, operation: "Spotlight scan")
         lastScanNewCount += added
-        isScanningSpotlight = false
         statusMessage = "Spotlight scan finished (\(candidates.count) found, \(added) new)."
     }
 
@@ -197,12 +240,11 @@ public final class FileScannerService {
     public func importURLs(_ urls: [URL], into context: ModelContext) async -> Int {
         var allCandidates: [DiscoveredFileCandidate] = []
         for url in urls {
+            if Task.isCancelled { break }
             var isDir: ObjCBool = false
             guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { continue }
             if isDir.boolValue {
-                let sub = await Task.detached(priority: .userInitiated) {
-                    Self.enumerateFolderRecursively(at: url, source: .manual)
-                }.value
+                let sub = await Self.enumerateFolderRecursivelyAsync(at: url, source: .manual)
                 allCandidates.append(contentsOf: sub)
             } else {
                 let ext = url.pathExtension.lowercased()
@@ -214,7 +256,7 @@ public final class FileScannerService {
         }
 
         let added = ingestCandidates(allCandidates, into: context)
-        try? context.save()
+        saveContext(context, operation: "file import")
         await analyzeUnprocessedMeshes(context: context)
         return added
     }
@@ -230,7 +272,7 @@ public final class FileScannerService {
             removed += 1
         }
         if removed > 0 {
-            try? context.save()
+            saveContext(context, operation: "pruning unsupported formats")
         }
         return removed
     }
@@ -244,7 +286,7 @@ public final class FileScannerService {
             removed += 1
         }
         if removed > 0 {
-            try? context.save()
+            saveContext(context, operation: "pruning missing files")
             statusMessage = "Removed \(removed) missing file(s) from library."
         } else {
             statusMessage = "All library files are present on disk."
@@ -257,7 +299,13 @@ public final class FileScannerService {
     private func ingestCandidates(_ candidates: [DiscoveredFileCandidate], into context: ModelContext) -> Int {
         guard !candidates.isEmpty else { return 0 }
 
-        let existingItems = (try? context.fetch(FetchDescriptor<PrintFileItem>())) ?? []
+        let existingItems: [PrintFileItem]
+        do {
+            existingItems = try context.fetch(FetchDescriptor<PrintFileItem>())
+        } catch {
+            Self.logger.error("Failed to fetch existing items before ingestion: \(error.localizedDescription, privacy: .public)")
+            return 0
+        }
         var existingByPath = Dictionary(uniqueKeysWithValues: existingItems.map { ($0.filePath, $0) })
 
         let categories = (try? context.fetch(FetchDescriptor<PrintCategory>())) ?? []
@@ -269,6 +317,7 @@ public final class FileScannerService {
                     existing.fileSize = candidate.fileSize
                     existing.dateModified = candidate.dateModified
                     existing.meshAnalyzed = false
+                    existing.surfaceAreaCm2 = 0
                 }
                 if !candidate.finderTags.isEmpty {
                     let merged = Set(existing.tags).union(candidate.finderTags)
@@ -317,7 +366,7 @@ public final class FileScannerService {
                 updatedCount += 1
             }
         }
-        try? context.save()
+        saveContext(context, operation: "auto-categorization")
         return updatedCount
     }
 
@@ -362,31 +411,30 @@ public final class FileScannerService {
         let descriptor = FetchDescriptor<PrintFileItem>(
             predicate: #Predicate { $0.meshAnalyzed == false || $0.surfaceAreaCm2 == 0 }
         )
-        guard let pending = try? context.fetch(descriptor), !pending.isEmpty else { return }
+        let pending: [PrintFileItem]
+        do {
+            pending = try context.fetch(descriptor)
+        } catch {
+            Self.logger.error("Failed to fetch pending meshes for analysis: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+        guard !pending.isEmpty else { return }
 
         isAnalyzingMeshes = true
+        defer { isAnalyzingMeshes = false }
         analyzedProgress = 0
-        let batch = Array(pending.prefix(200))
-        let total = batch.count
+        let total = pending.count
         let chunkSize = 12
 
         var processed = 0
         while processed < total {
             if Task.isCancelled { break }
             let end = min(processed + chunkSize, total)
-            let chunk = Array(batch[processed..<end])
+            let chunk = Array(pending[processed..<end])
             let urls = chunk.map(\.fileURL)
 
-            // Analyze chunk off the main actor before mutating SwiftData models to avoid per-item @Query storms
-            let results: [MeshMetadata?] = await Task.detached(priority: .utility) {
-                var out: [MeshMetadata?] = []
-                out.reserveCapacity(urls.count)
-                for url in urls {
-                    if Task.isCancelled { break }
-                    out.append(await MeshLoaderService.analyzeMetadata(at: url))
-                }
-                return out
-            }.value
+            // Analyze chunk off the main actor while inheriting cancellation from the parent task
+            let results = await Self.analyzeMetadataChunkAsync(urls: urls)
 
             for (offset, meta) in results.enumerated() {
                 let item = chunk[offset]
@@ -397,20 +445,66 @@ public final class FileScannerService {
                     item.dimensionY = meta.dimensionY
                     item.dimensionZ = meta.dimensionZ
                     item.estimatedVolumeCm3 = meta.volumeCm3
-                    item.surfaceAreaCm2 = meta.surfaceAreaCm2
+                    // Use -1 sentinel when surface area is unavailable (e.g. ModelIO fallback) so this item is not re-analyzed forever
+                    item.surfaceAreaCm2 = meta.surfaceAreaCm2 > 0 ? meta.surfaceAreaCm2 : -1
                     item.embeddedSubModelCount = meta.subModelCount
+                } else {
+                    item.surfaceAreaCm2 = -1
                 }
                 item.meshAnalyzed = true
             }
 
-            processed = end
+            processed += results.count
             analyzedProgress = Double(processed) / Double(total)
-            try? context.save()
+            saveContext(context, operation: "mesh analysis")
+            if Task.isCancelled { break }
             await Task.yield()
         }
 
-        isAnalyzingMeshes = false
         statusMessage = "Ready"
+    }
+
+    // MARK: - Off-Main-Actor Cooperative Async Helpers
+
+    private nonisolated static func enumerateFolderRecursivelyAsync(
+        at folderURL: URL,
+        source: DiscoverySource
+    ) async -> [DiscoveredFileCandidate] {
+        enumerateFolderRecursively(at: folderURL, source: source)
+    }
+
+    private nonisolated static func buildSpotlightCandidatesAsync(
+        from rawItems: [(path: String, size: Int64, modDate: Date)]
+    ) async -> [DiscoveredFileCandidate] {
+        var candidates: [DiscoveredFileCandidate] = []
+        candidates.reserveCapacity(rawItems.count)
+        for entry in rawItems {
+            if Task.isCancelled { break }
+            let url = URL(fileURLWithPath: entry.path)
+            let tags = FinderTagService.readTags(for: url)
+            candidates.append(
+                DiscoveredFileCandidate(
+                    filePath: entry.path,
+                    fileName: url.lastPathComponent,
+                    fileExtension: url.pathExtension.lowercased(),
+                    fileSize: entry.size,
+                    dateModified: entry.modDate,
+                    source: .spotlight,
+                    finderTags: tags
+                )
+            )
+        }
+        return candidates
+    }
+
+    private nonisolated static func analyzeMetadataChunkAsync(urls: [URL]) async -> [MeshMetadata?] {
+        var out: [MeshMetadata?] = []
+        out.reserveCapacity(urls.count)
+        for url in urls {
+            if Task.isCancelled { break }
+            out.append(await MeshLoaderService.analyzeMetadata(at: url))
+        }
+        return out
     }
 
     // MARK: - File System Enumeration Helpers
@@ -430,6 +524,7 @@ public final class FileScannerService {
         }
 
         for case let fileURL as URL in enumerator {
+            if Task.isCancelled { break }
             let path = fileURL.path
             if shouldSkipPath(path) {
                 enumerator.skipDescendants()
@@ -501,7 +596,7 @@ public final class FileScannerService {
             }
         }
 
-        try? context.save()
+        saveContext(context, operation: "clearing organization metadata")
         statusMessage = restoreDefaultCategories
             ? "Cleared metadata on \(clearedItems) model(s) and restored \(PrintCategory.defaultSeeds.count) default categories."
             : "Cleared metadata on \(clearedItems) model(s) and removed \(deletedCategories) categor\(deletedCategories == 1 ? "y" : "ies")."

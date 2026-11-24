@@ -180,16 +180,12 @@ struct ModelGridCardView: View {
         .contextMenu {
             contextMenuItems
         }
-        .task(id: "\(item.filePath)|\(thumbnailGeneration)") {
-            if let cached = ThumbnailService.shared.cachedThumbnail(for: item.filePath) {
-                if thumbnailImage !== cached {
-                    thumbnailImage = cached
-                }
-                return
+        .task(id: "\(item.filePath)|\(item.dateModified.timeIntervalSince1970)|\(thumbnailGeneration)") {
+            if let cached = ThumbnailService.shared.cachedThumbnail(for: item.filePath), thumbnailImage !== cached {
+                thumbnailImage = cached
             }
-            thumbnailImage = nil
             let loaded = await ThumbnailService.shared.thumbnail(for: item.fileURL)
-            if !Task.isCancelled, let loaded {
+            if !Task.isCancelled {
                 thumbnailImage = loaded
             }
         }

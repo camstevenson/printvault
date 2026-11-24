@@ -45,6 +45,8 @@ enum BrowserViewMode: String, CaseIterable, Identifiable {
 // MARK: - ContentView
 
 struct ContentView: View {
+    var persistenceWarning: String? = nil
+
     @Environment(\.modelContext) private var modelContext
 
     @Query(sort: \PrintFileItem.dateModified, order: .reverse)
@@ -57,8 +59,9 @@ struct ContentView: View {
     private var watchedFolders: [WatchedFolder]
 
     @State private var scanner = FileScannerService()
-    @State private var slicerService = SlicerService.shared
-    @State private var vlmService = VLMCategorizerService.shared
+    private let slicerService = SlicerService.shared
+    private let vlmService = VLMCategorizerService.shared
+    @State private var dismissedPersistenceWarning: Bool = false
 
     @State private var sidebarFilter: SidebarFilter? = .all
     @State private var selectedItemPaths: Set<String> = []
@@ -192,11 +195,11 @@ struct ContentView: View {
 
     private func resolveSelectedItem(in displayedItems: [PrintFileItem]) -> PrintFileItem? {
         if let primarySelectedPath,
-           let item = allItems.first(where: { $0.filePath == primarySelectedPath }) {
+           let item = displayedItems.first(where: { $0.filePath == primarySelectedPath }) {
             return item
         }
-        if let firstPath = selectedItemPaths.first,
-           let item = allItems.first(where: { $0.filePath == firstPath }) {
+        if !selectedItemPaths.isEmpty,
+           let item = displayedItems.first(where: { selectedItemPaths.contains($0.filePath) }) {
             return item
         }
         return displayedItems.first
@@ -207,6 +210,17 @@ struct ContentView: View {
         if !matched.isEmpty { return matched }
         if let active = resolveSelectedItem(in: displayedItems) { return [active] }
         return []
+    }
+
+    private func pruneStaleSelection(validItems: [PrintFileItem]) {
+        let validPaths = Set(validItems.map(\.filePath))
+        let pruned = selectedItemPaths.intersection(validPaths)
+        if pruned != selectedItemPaths {
+            selectedItemPaths = pruned
+        }
+        if let primary = primarySelectedPath, !validPaths.contains(primary) {
+            primarySelectedPath = pruned.first
+        }
     }
 
     var body: some View {
@@ -356,6 +370,11 @@ struct ContentView: View {
         }
         .onChange(of: sidebarFilter) { _, _ in
             openedGroupID = nil
+            selectedItemPaths.removeAll()
+            primarySelectedPath = nil
+        }
+        .onChange(of: allItems.count) { _, _ in
+            pruneStaleSelection(validItems: allItems)
         }
         .onChange(of: groupRelatedModels) { _, isGrouped in
             if !isGrouped {
@@ -656,6 +675,29 @@ struct ContentView: View {
         }
 
         return VStack(spacing: 0) {
+            if let persistenceWarning, !dismissedPersistenceWarning {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text(persistenceWarning)
+                        .font(.caption)
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+                    Spacer()
+                    Button {
+                        dismissedPersistenceWarning = true
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.caption2)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(Color.orange.opacity(0.16))
+                Divider()
+            }
+
             // Sub-header bar
             HStack(spacing: 12) {
                 if let opened = activeOpenedGroup {
@@ -729,10 +771,12 @@ struct ContentView: View {
                 groupDrillInBar(group: opened, defaultSlicerName: defaultSlicerName)
             }
 
-            // Multi-select Batch Action Bar
-            if selectedItemPaths.count > 1 {
+            // Multi-select Batch Action Bar (only shown when 2+ currently visible items are selected)
+            let visibleScopeItems = activeOpenedGroup?.items ?? displayedItems
+            let visibleSelectedItems = visibleScopeItems.filter { selectedItemPaths.contains($0.filePath) }
+            if visibleSelectedItems.count > 1 {
                 Divider()
-                batchActionBar(displayedItems: activeOpenedGroup?.items ?? displayedItems)
+                batchActionBar(batchItems: visibleSelectedItems)
             }
 
             Divider()
@@ -907,9 +951,8 @@ struct ContentView: View {
         .background(Color.accentColor.opacity(0.07))
     }
 
-    private func batchActionBar(displayedItems: [PrintFileItem]) -> some View {
-        let batchItems = resolveSelectedItems(in: displayedItems)
-        return HStack(spacing: 10) {
+    private func batchActionBar(batchItems: [PrintFileItem]) -> some View {
+        HStack(spacing: 10) {
             Text("\(batchItems.count) selected")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(Color.accentColor)
@@ -1065,8 +1108,10 @@ struct ContentView: View {
             }
             .listStyle(.inset(alternatesRowBackgrounds: true))
             .onChange(of: selectedItemPaths) { _, newValue in
-                if let last = newValue.first, !newValue.contains(primarySelectedPath ?? "") {
-                    primarySelectedPath = last
+                if newValue.isEmpty {
+                    primarySelectedPath = nil
+                } else if !newValue.contains(primarySelectedPath ?? "") {
+                    primarySelectedPath = newValue.first
                 }
             }
         }
@@ -1572,45 +1617,62 @@ struct ContentView: View {
 
     // MARK: - Bootstrap & File Dialog Helpers
 
+    private static let bootstrappedDefaultsKey = "PrintVault.HasBootstrappedDefaults.v1"
+
     private func bootstrapInitialDataAndScan() async {
         // Remove any previously indexed unsupported formats (e.g. .obj, .ply) and collapse slug duplicate categories
         _ = scanner.pruneUnsupportedFormats(context: modelContext)
         _ = VLMCategorizerService.mergeDuplicateCategories(context: modelContext)
 
-        if categories.isEmpty {
-            for (idx, seed) in PrintCategory.defaultSeeds.enumerated() {
-                let cat = PrintCategory(
-                    name: seed.name,
-                    iconName: seed.icon,
-                    colorHex: seed.hex,
-                    sortOrder: idx
-                )
-                modelContext.insert(cat)
-            }
-            try? modelContext.save()
-        }
+        let existingCategories = (try? modelContext.fetch(FetchDescriptor<PrintCategory>())) ?? []
+        let existingFolders = (try? modelContext.fetch(FetchDescriptor<WatchedFolder>())) ?? []
+        let existingItems = (try? modelContext.fetch(FetchDescriptor<PrintFileItem>())) ?? []
+        let hasBootstrapped = UserDefaults.standard.bool(forKey: Self.bootstrappedDefaultsKey)
 
-        if watchedFolders.isEmpty {
-            let fm = FileManager.default
-            if let downloads = fm.urls(for: .downloadsDirectory, in: .userDomainMask).first {
-                modelContext.insert(WatchedFolder(path: downloads.path, displayName: "Downloads"))
+        // Only seed default categories/folders/samples on first launch so explicit user clears are respected
+        if !hasBootstrapped {
+            if existingCategories.isEmpty {
+                for (idx, seed) in PrintCategory.defaultSeeds.enumerated() {
+                    let cat = PrintCategory(
+                        name: seed.name,
+                        iconName: seed.icon,
+                        colorHex: seed.hex,
+                        sortOrder: idx
+                    )
+                    modelContext.insert(cat)
+                }
+                try? modelContext.save()
             }
-            if let documents = fm.urls(for: .documentDirectory, in: .userDomainMask).first {
-                modelContext.insert(WatchedFolder(path: documents.path, displayName: "Documents"))
-            }
-            try? modelContext.save()
-        }
 
-        if allItems.isEmpty {
-            let sampleURLs = SampleMeshGenerator.createSampleModelsOnDisk()
-            _ = await scanner.importURLs(sampleURLs, into: modelContext)
+            if existingFolders.isEmpty {
+                let fm = FileManager.default
+                if let downloads = fm.urls(for: .downloadsDirectory, in: .userDomainMask).first {
+                    modelContext.insert(WatchedFolder(path: downloads.path, displayName: "Downloads"))
+                }
+                if let documents = fm.urls(for: .documentDirectory, in: .userDomainMask).first {
+                    modelContext.insert(WatchedFolder(path: documents.path, displayName: "Documents"))
+                }
+                try? modelContext.save()
+            }
+
+            if existingItems.isEmpty {
+                let sampleURLs = SampleMeshGenerator.createSampleModelsOnDisk()
+                _ = await scanner.importURLs(sampleURLs, into: modelContext)
+            }
+
+            UserDefaults.standard.set(true, forKey: Self.bootstrappedDefaultsKey)
         }
 
         await scanner.performFullScan(context: modelContext, includeSpotlight: true)
 
-        if primarySelectedPath == nil, let first = allItems.first {
-            selectedItemPaths = [first.filePath]
-            primarySelectedPath = first.filePath
+        if primarySelectedPath == nil {
+            let refreshed = (try? modelContext.fetch(
+                FetchDescriptor<PrintFileItem>(sortBy: [SortDescriptor(\.dateModified, order: .reverse)])
+            )) ?? []
+            if let first = refreshed.first {
+                selectedItemPaths = [first.filePath]
+                primarySelectedPath = first.filePath
+            }
         }
     }
 

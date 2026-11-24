@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import Observation
+import os
 
 // MARK: - Slicer Hook Protocol & Pipeline Types
 
@@ -273,6 +274,7 @@ public struct SlicerHookEvent: Identifiable, Sendable {
 public final class SlicerService {
     public static let shared = SlicerService()
 
+    private static let logger = Logger(subsystem: "com.printvault.PrintVault", category: "SlicerService")
     private let profilesDefaultsKey = "PrintVault.SlicerProfiles.v1"
     private let defaultSlicerIdKey = "PrintVault.DefaultSlicerId.v1"
     private let hookConfigKey = "PrintVault.SlicerHookConfig.v1"
@@ -283,6 +285,7 @@ public final class SlicerService {
     public var recentEvents: [SlicerHookEvent] = []
     public var lastStatusBanner: String?
     public var detectionRefreshCount: Int = 0
+    public private(set) var installedProfileIDs: Set<String> = []
 
     /// Registered programmatic Swift hooks (executed alongside configured shell/URL hooks)
     private var registeredHooks: [any SlicerHook] = []
@@ -292,6 +295,18 @@ public final class SlicerService {
             loadConfiguration()
         } else {
             profiles = SlicerProfile.builtInPresets
+        }
+    }
+
+    public func isInstalled(_ profile: SlicerProfile) -> Bool {
+        installedProfileIDs.contains(profile.id)
+    }
+
+    public func refreshInstallationStatus(for profile: SlicerProfile) {
+        if profile.isInstalled {
+            installedProfileIDs.insert(profile.id)
+        } else {
+            installedProfileIDs.remove(profile.id)
         }
     }
 
@@ -308,14 +323,14 @@ public final class SlicerService {
         if let match = profiles.first(where: { $0.id == defaultSlicerId }) {
             return match
         }
-        if let installed = profiles.first(where: { $0.isInstalled }) {
+        if let installed = profiles.first(where: { installedProfileIDs.contains($0.id) }) {
             return installed
         }
         return profiles.first ?? SlicerProfile.builtInPresets[0]
     }
 
     public var installedProfiles: [SlicerProfile] {
-        profiles.filter { $0.isInstalled }
+        profiles.filter { installedProfileIDs.contains($0.id) }
     }
 
     // MARK: - Persistence & Detection
@@ -359,13 +374,19 @@ public final class SlicerService {
     }
 
     public func rescanInstalledSlicers(save: Bool = true) {
+        var detected = Set<String>()
         for idx in profiles.indices {
             if !FileManager.default.fileExists(atPath: profiles[idx].appPath),
                let resolved = profiles[idx].resolvedAppURL {
                 profiles[idx].appPath = resolved.path
             }
+            if profiles[idx].isInstalled {
+                detected.insert(profiles[idx].id)
+            }
         }
-        if !defaultProfile.isInstalled, let firstInstalled = profiles.first(where: { $0.isInstalled }) {
+        installedProfileIDs = detected
+        if !installedProfileIDs.contains(defaultProfile.id),
+           let firstInstalled = profiles.first(where: { installedProfileIDs.contains($0.id) }) {
             defaultSlicerId = firstInstalled.id
         }
         detectionRefreshCount += 1
@@ -375,12 +396,18 @@ public final class SlicerService {
     }
 
     public func saveConfiguration() {
-        if let data = try? JSONEncoder().encode(profiles) {
+        do {
+            let data = try JSONEncoder().encode(profiles)
             UserDefaults.standard.set(data, forKey: profilesDefaultsKey)
+        } catch {
+            Self.logger.error("Failed to encode slicer profiles: \(error.localizedDescription, privacy: .public)")
         }
         UserDefaults.standard.set(defaultSlicerId, forKey: defaultSlicerIdKey)
-        if let hookData = try? JSONEncoder().encode(hookConfig) {
+        do {
+            let hookData = try JSONEncoder().encode(hookConfig)
             UserDefaults.standard.set(hookData, forKey: hookConfigKey)
+        } catch {
+            Self.logger.error("Failed to encode slicer hook config: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -403,18 +430,27 @@ public final class SlicerService {
             accentHex: "#EC4899"
         )
         profiles.append(profile)
+        if profile.isInstalled {
+            installedProfileIDs.insert(profile.id)
+        }
         saveConfiguration()
     }
 
     public func updateProfile(_ updated: SlicerProfile) {
         if let idx = profiles.firstIndex(where: { $0.id == updated.id }) {
             profiles[idx] = updated
+            if updated.isInstalled {
+                installedProfileIDs.insert(updated.id)
+            } else {
+                installedProfileIDs.remove(updated.id)
+            }
             saveConfiguration()
         }
     }
 
     public func removeProfile(id: String) {
         profiles.removeAll { $0.id == id && !$0.isBuiltIn }
+        installedProfileIDs.remove(id)
         if defaultSlicerId == id, let first = profiles.first {
             defaultSlicerId = first.id
         }
@@ -612,28 +648,34 @@ public final class SlicerService {
                 return (false, cmdDesc, "Failed to open \(profile.name): \(error.localizedDescription)")
             }
         } else {
-            // Fallback: try `/usr/bin/open -a <Name>`
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-            proc.arguments = ["-a", profile.name] + fileURLs.map(\.path)
+            // Fallback: try `/usr/bin/open -a <Name>` off the main actor
+            let args = ["-a", profile.name] + fileURLs.map(\.path)
             let cmdDesc = "open -a \(Self.shellEscape(profile.name)) " + fileURLs.map { Self.shellEscape($0.path) }.joined(separator: " ")
-            do {
-                try proc.run()
-                proc.waitUntilExit()
-                if proc.terminationStatus == 0 {
-                    return (true, cmdDesc, "Opened in \(profile.name).")
-                }
-            } catch {}
-
-            return (
-                false,
-                cmdDesc,
-                "\(profile.name) was not found at \(profile.appPath). Configure its path in Slicer Hooks Settings."
+            let (ok, output) = await Self.runProcess(
+                executableURL: URL(fileURLWithPath: "/usr/bin/open"),
+                arguments: args
             )
+            if ok {
+                return (true, cmdDesc, "Opened in \(profile.name).")
+            }
+
+            let detail = output.trimmingCharacters(in: .whitespacesAndNewlines)
+            let msg = detail.isEmpty
+                ? "\(profile.name) was not found at \(profile.appPath). Configure its path in Slicer Hooks Settings."
+                : "\(profile.name) could not be opened: \(detail)"
+            return (false, cmdDesc, msg)
         }
     }
 
     // MARK: - Safe Placeholder Expansion & Shell Escaping
+
+    /// Query-value character set that also percent-encodes `&`, `=`, `+`, and `?` so values like
+    /// `"Organizers & Gridfinity"` never break URL query parameter parsing.
+    private nonisolated static let urlQueryValueAllowed: CharacterSet = {
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "&=+?")
+        return allowed
+    }()
 
     /// Escapes a string safely for POSIX shells (`zsh` / `sh`) using single-quote wrapping.
     public nonisolated static func shellEscape(_ value: String) -> String {
@@ -658,9 +700,10 @@ public final class SlicerService {
     public static func expandURLTemplate(template: String, items: [PrintFileItem], slicerName: String) -> String {
         guard let primary = items.first else { return template }
         let encode: (String) -> String = {
-            $0.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? $0
+            $0.addingPercentEncoding(withAllowedCharacters: urlQueryValueAllowed) ?? $0
         }
         var result = template
+        result = result.replacingOccurrences(of: "{files}", with: encode(items.map(\.filePath).joined(separator: ",")))
         result = result.replacingOccurrences(of: "{file}", with: encode(primary.filePath))
         result = result.replacingOccurrences(of: "{dir}", with: encode(primary.fileURL.deletingLastPathComponent().path))
         result = result.replacingOccurrences(of: "{name}", with: encode(primary.displayTitle))
@@ -702,27 +745,112 @@ public final class SlicerService {
     }
 
     public nonisolated static func executeShellCommand(_ command: String) async -> (Bool, String) {
-        await Task.detached(priority: .utility) {
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            proc.arguments = ["-c", command]
-            let outPipe = Pipe()
-            let errPipe = Pipe()
-            proc.standardOutput = outPipe
-            proc.standardError = errPipe
-            do {
-                try proc.run()
-                let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-                let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-                proc.waitUntilExit()
+        await runProcess(
+            executableURL: URL(fileURLWithPath: "/bin/zsh"),
+            arguments: ["-c", command]
+        )
+    }
+
+    /// Runs a child process without blocking Swift's cooperative thread pool, draining stdout and stderr
+    /// concurrently to prevent pipe buffer deadlocks and terminating the process if the task is cancelled.
+    public nonisolated static func runProcess(
+        executableURL: URL,
+        arguments: [String]
+    ) async -> (Bool, String) {
+        guard !Task.isCancelled else { return (false, "Cancelled") }
+
+        let proc = Process()
+        proc.executableURL = executableURL
+        proc.arguments = arguments
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        proc.standardOutput = outPipe
+        proc.standardError = errPipe
+
+        final class OutputCollector: @unchecked Sendable {
+            private let lock = NSLock()
+            var outData = Data()
+            var errData = Data()
+            var terminationStatus: Int32 = -1
+
+            func setOut(_ data: Data) {
+                lock.lock()
+                outData = data
+                lock.unlock()
+            }
+
+            func setErr(_ data: Data) {
+                lock.lock()
+                errData = data
+                lock.unlock()
+            }
+
+            func setStatus(_ status: Int32) {
+                lock.lock()
+                terminationStatus = status
+                lock.unlock()
+            }
+
+            func finish() -> (Bool, String) {
+                lock.lock()
+                let status = terminationStatus
                 let outStr = String(data: outData, encoding: .utf8) ?? ""
                 let errStr = String(data: errData, encoding: .utf8) ?? ""
+                lock.unlock()
                 let combined = [outStr, errStr].filter { !$0.isEmpty }.joined(separator: "\n")
-                return (proc.terminationStatus == 0, combined)
-            } catch {
-                return (false, error.localizedDescription)
+                return (status == 0, combined)
             }
-        }.value
+        }
+
+        let collector = OutputCollector()
+        let group = DispatchGroup()
+
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                group.enter() // process exit
+                proc.terminationHandler = { process in
+                    collector.setStatus(process.terminationStatus)
+                    group.leave()
+                }
+
+                do {
+                    try proc.run()
+                } catch {
+                    proc.terminationHandler = nil
+                    group.leave()
+                    continuation.resume(returning: (false, error.localizedDescription))
+                    return
+                }
+
+                // Close parent write ends so pipe readers see EOF as soon as child exits
+                try? outPipe.fileHandleForWriting.close()
+                try? errPipe.fileHandleForWriting.close()
+
+                group.enter() // stdout drain
+                DispatchQueue.global(qos: .utility).async {
+                    let data = outPipe.fileHandleForReading.readDataToEndOfFile()
+                    try? outPipe.fileHandleForReading.close()
+                    collector.setOut(data)
+                    group.leave()
+                }
+
+                group.enter() // stderr drain
+                DispatchQueue.global(qos: .utility).async {
+                    let data = errPipe.fileHandleForReading.readDataToEndOfFile()
+                    try? errPipe.fileHandleForReading.close()
+                    collector.setErr(data)
+                    group.leave()
+                }
+
+                group.notify(queue: DispatchQueue.global(qos: .utility)) {
+                    continuation.resume(returning: collector.finish())
+                }
+            }
+        } onCancel: {
+            if proc.isRunning {
+                proc.terminate()
+            }
+        }
     }
 
     private func recordEvent(

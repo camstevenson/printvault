@@ -487,11 +487,11 @@ private final class OrbitPanZoomSCNView: SCNView {
 
     // MARK: Right-Click Drag (or Middle-Click Drag) -> Pan / Move Model
 
-    override func rightMouseDown(with event: NSEvent) {
+    private func beginPan(with event: NSEvent) {
         lastDragPoint = convert(event.locationInWindow, from: nil)
     }
 
-    override func rightMouseDragged(with event: NSEvent) {
+    private func continuePan(with event: NSEvent) {
         let current = convert(event.locationInWindow, from: nil)
         guard let prev = lastDragPoint else {
             lastDragPoint = current
@@ -503,29 +503,17 @@ private final class OrbitPanZoomSCNView: SCNView {
         panModel(dx: dx, dy: dy)
     }
 
-    override func rightMouseUp(with event: NSEvent) {
+    private func endPan() {
         lastDragPoint = nil
     }
 
-    override func otherMouseDown(with event: NSEvent) {
-        lastDragPoint = convert(event.locationInWindow, from: nil)
-    }
+    override func rightMouseDown(with event: NSEvent) { beginPan(with: event) }
+    override func rightMouseDragged(with event: NSEvent) { continuePan(with: event) }
+    override func rightMouseUp(with event: NSEvent) { endPan() }
 
-    override func otherMouseDragged(with event: NSEvent) {
-        let current = convert(event.locationInWindow, from: nil)
-        guard let prev = lastDragPoint else {
-            lastDragPoint = current
-            return
-        }
-        let dx = Float(current.x - prev.x)
-        let dy = Float(current.y - prev.y)
-        lastDragPoint = current
-        panModel(dx: dx, dy: dy)
-    }
-
-    override func otherMouseUp(with event: NSEvent) {
-        lastDragPoint = nil
-    }
+    override func otherMouseDown(with event: NSEvent) { beginPan(with: event) }
+    override func otherMouseDragged(with event: NSEvent) { continuePan(with: event) }
+    override func otherMouseUp(with event: NSEvent) { endPan() }
 
     private func panModel(dx: Float, dy: Float) {
         guard let cameraNode = pointOfView else { return }
@@ -602,38 +590,7 @@ private struct SceneKitViewportRepresentable: NSViewRepresentable {
         scnView.scene = scene
 
         // Balanced 3-point studio lighting for crisp 3D depth without overexposure
-        let keyLightNode = SCNNode()
-        let keyLight = SCNLight()
-        keyLight.type = .directional
-        keyLight.intensity = 900
-        keyLightNode.light = keyLight
-        keyLightNode.eulerAngles = SCNVector3(-Float.pi / 3, Float.pi / 4, 0)
-        scene.rootNode.addChildNode(keyLightNode)
-
-        let fillLightNode = SCNNode()
-        let fillLight = SCNLight()
-        fillLight.type = .directional
-        fillLight.intensity = 340
-        fillLight.color = NSColor(calibratedRed: 0.85, green: 0.90, blue: 1.0, alpha: 1.0)
-        fillLightNode.light = fillLight
-        fillLightNode.eulerAngles = SCNVector3(-Float.pi / 5, -Float.pi * 0.65, 0)
-        scene.rootNode.addChildNode(fillLightNode)
-
-        let backLightNode = SCNNode()
-        let backLight = SCNLight()
-        backLight.type = .directional
-        backLight.intensity = 280
-        backLightNode.light = backLight
-        backLightNode.eulerAngles = SCNVector3(-Float.pi / 6, Float.pi * 0.9, 0)
-        scene.rootNode.addChildNode(backLightNode)
-
-        let ambientNode = SCNNode()
-        let ambient = SCNLight()
-        ambient.type = .ambient
-        ambient.intensity = 220
-        ambient.color = NSColor(calibratedWhite: 0.88, alpha: 1.0)
-        ambientNode.light = ambient
-        scene.rootNode.addChildNode(ambientNode)
+        MeshLoaderService.addStudioLighting(to: scene)
 
         let cameraNode = SCNNode()
         let camera = SCNCamera()
@@ -654,7 +611,7 @@ private struct SceneKitViewportRepresentable: NSViewRepresentable {
             context.coordinator.currentMeshClone?.removeFromParentNode()
             context.coordinator.buildPlateNode?.removeFromParentNode()
 
-            let clone = meshRootNode.clone()
+            let clone = MeshLoaderService.cloneWithIndependentGeometry(meshRootNode)
             scene.rootNode.addChildNode(clone)
             context.coordinator.currentMeshClone = clone
             context.coordinator.currentSourceNode = meshRootNode

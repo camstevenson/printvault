@@ -4,6 +4,29 @@ import SceneKit.ModelIO
 import ModelIO
 import AppKit
 import simd
+import os
+
+// MARK: - Mesh Loader Errors
+
+public enum MeshLoaderError: LocalizedError, Sendable {
+    case noModelFilesIn3MF
+    case noMeshGeometryIn3MF
+    case unableToParseGeometry(fileName: String)
+    case zipExtractionFailed(status: Int32)
+
+    public var errorDescription: String? {
+        switch self {
+        case .noModelFilesIn3MF:
+            return "No 3D .model files found inside 3MF archive."
+        case .noMeshGeometryIn3MF:
+            return "No 3D mesh geometry found inside 3MF archive."
+        case .unableToParseGeometry(let fileName):
+            return "Unable to parse 3D geometry from \(fileName)."
+        case .zipExtractionFailed(let status):
+            return "Failed to extract 3MF archive (unzip exited with status \(status))."
+        }
+    }
+}
 
 // MARK: - Loaded Mesh Result
 
@@ -44,21 +67,85 @@ public struct LoadedMeshScene: @unchecked Sendable {
     public let embeddedThumbnail: NSImage?
 }
 
-// MARK: - Small In-Memory Scene Cache (Instant Re-selection of Heavy Models)
+// MARK: - Small In-Memory Scene Cache with In-Flight Coalescing
 
 private actor LoadedSceneCache {
     static let shared = LoadedSceneCache()
-    private var entries: [(key: String, scene: LoadedMeshScene)] = []
-    private let maxEntries = 4
 
-    func get(key: String) -> LoadedMeshScene? {
-        guard let idx = entries.firstIndex(where: { $0.key == key }) else { return nil }
-        let entry = entries.remove(at: idx)
-        entries.append(entry)
-        return entry.scene
+    private struct InFlightLoad {
+        let task: Task<LoadedMeshScene, Error>
+        var waiters: Set<UUID>
     }
 
-    func set(key: String, scene: LoadedMeshScene) {
+    private var entries: [(key: String, scene: LoadedMeshScene)] = []
+    private var inFlight: [String: InFlightLoad] = [:]
+    private let maxEntries = 4
+
+    func loadOrCoalesce(
+        key: String,
+        loader: @escaping @Sendable () async throws -> LoadedMeshScene
+    ) async throws -> LoadedMeshScene {
+        if let idx = entries.firstIndex(where: { $0.key == key }) {
+            let entry = entries.remove(at: idx)
+            entries.append(entry)
+            return entry.scene
+        }
+
+        let waiterID = UUID()
+        let task: Task<LoadedMeshScene, Error>
+        if var existing = inFlight[key] {
+            existing.waiters.insert(waiterID)
+            inFlight[key] = existing
+            task = existing.task
+        } else {
+            let created = Task(priority: .userInitiated) {
+                try await loader()
+            }
+            inFlight[key] = InFlightLoad(task: created, waiters: [waiterID])
+            task = created
+        }
+
+        return try await withTaskCancellationHandler {
+            do {
+                let scene = try await task.value
+                finishWaiter(key: key, task: task, waiterID: waiterID, loadedScene: scene)
+                return scene
+            } catch {
+                finishWaiter(key: key, task: task, waiterID: waiterID, loadedScene: nil)
+                throw error
+            }
+        } onCancel: {
+            Task {
+                await self.cancelWaiter(key: key, task: task, waiterID: waiterID)
+            }
+        }
+    }
+
+    private func finishWaiter(key: String, task: Task<LoadedMeshScene, Error>, waiterID: UUID, loadedScene: LoadedMeshScene?) {
+        if let loadedScene {
+            store(key: key, scene: loadedScene)
+        }
+        guard var existing = inFlight[key], existing.task == task else { return }
+        existing.waiters.remove(waiterID)
+        if existing.waiters.isEmpty {
+            inFlight[key] = nil
+        } else {
+            inFlight[key] = existing
+        }
+    }
+
+    private func cancelWaiter(key: String, task: Task<LoadedMeshScene, Error>, waiterID: UUID) {
+        guard var existing = inFlight[key], existing.task == task else { return }
+        existing.waiters.remove(waiterID)
+        if existing.waiters.isEmpty {
+            existing.task.cancel()
+            inFlight[key] = nil
+        } else {
+            inFlight[key] = existing
+        }
+    }
+
+    private func store(key: String, scene: LoadedMeshScene) {
         entries.removeAll { $0.key == key }
         entries.append((key, scene))
         if entries.count > maxEntries {
@@ -70,6 +157,7 @@ private actor LoadedSceneCache {
 // MARK: - MeshLoaderService
 
 public enum MeshLoaderService {
+    private static let logger = Logger(subsystem: "com.printvault.PrintVault", category: "MeshLoader")
 
     /// Maximum triangles uploaded to SceneKit for interactive preview before applying fast watertight vertex-clustering LOD.
     /// Exact full-resolution triangle count, dimensions, volume, and surface area are always computed from the full mesh.
@@ -77,52 +165,53 @@ public enum MeshLoaderService {
 
     /// Loads a 3D print file (.stl or .3mf) into an `SCNNode` with computed normals and exact millimeter bounding box metadata.
     public static func loadMesh(at url: URL) async throws -> LoadedMeshScene {
+        try Task.checkCancellation()
         let cacheKey = makeCacheKey(for: url)
-        if let cached = await LoadedSceneCache.shared.get(key: cacheKey) {
-            return cached
+        return try await LoadedSceneCache.shared.loadOrCoalesce(key: cacheKey) {
+            try await loadMeshUncached(at: url, buildScene: true)
         }
-
-        let ext = url.pathExtension.lowercased()
-        let loaded: LoadedMeshScene
-        switch ext {
-        case "stl":
-            loaded = try await Task.detached(priority: .userInitiated) {
-                try loadSTL(at: url)
-            }.value
-        case "3mf":
-            loaded = try await Task.detached(priority: .userInitiated) {
-                try load3MF(at: url)
-            }.value
-        default:
-            loaded = try await Task.detached(priority: .userInitiated) {
-                try loadViaModelIO(at: url)
-            }.value
-        }
-
-        await LoadedSceneCache.shared.set(key: cacheKey, scene: loaded)
-        return loaded
     }
 
     /// Lightweight metadata-only analyzer for background indexing (skips SceneKit GPU buffer creation for huge files).
     public static func analyzeMetadata(at url: URL) async -> MeshMetadata? {
-        let ext = url.pathExtension.lowercased()
+        guard !Task.isCancelled else { return nil }
         do {
-            switch ext {
-            case "stl":
-                return try await Task.detached(priority: .utility) {
-                    try loadSTL(at: url, buildScene: false).metadata
-                }.value
-            case "3mf":
-                return try await Task.detached(priority: .utility) {
-                    try load3MF(at: url, buildScene: false).metadata
-                }.value
-            default:
-                return try await Task.detached(priority: .utility) {
-                    try loadViaModelIO(at: url).metadata
-                }.value
-            }
-        } catch {
+            return try await loadMeshUncached(at: url, buildScene: false).metadata
+        } catch is CancellationError {
             return nil
+        } catch {
+            logger.debug("Mesh metadata analysis failed for \(url.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+    }
+
+    private static func loadMeshUncached(at url: URL, buildScene: Bool) async throws -> LoadedMeshScene {
+        try Task.checkCancellation()
+        let ext = url.pathExtension.lowercased()
+        switch ext {
+        case "stl":
+            return try loadSTL(at: url, buildScene: buildScene)
+        case "3mf":
+            return try await load3MF(at: url, buildScene: buildScene)
+        default:
+            return try loadViaModelIO(at: url)
+        }
+    }
+
+    /// Deep-copies `SCNGeometry` objects on a cloned node tree so callers can safely customize materials
+    /// without mutating geometries shared with `LoadedSceneCache`.
+    public static func cloneWithIndependentGeometry(_ node: SCNNode) -> SCNNode {
+        let copy = node.clone()
+        detachSharedGeometries(in: copy)
+        return copy
+    }
+
+    private static func detachSharedGeometries(in node: SCNNode) {
+        if let geo = node.geometry?.copy() as? SCNGeometry {
+            node.geometry = geo
+        }
+        for child in node.childNodes {
+            detachSharedGeometries(in: child)
         }
     }
 
@@ -231,6 +320,11 @@ public enum MeshLoaderService {
                     raw.loadUnaligned(fromByteOffset: offset + 44, as: Float.self)
                 )
 
+                guard Self.isFiniteVertex(v1), Self.isFiniteVertex(v2), Self.isFiniteVertex(v3) else {
+                    offset += 50
+                    continue
+                }
+
                 minBounds = simd_min(minBounds, simd_min(v1, simd_min(v2, v3)))
                 maxBounds = simd_max(maxBounds, simd_max(v1, simd_max(v2, v3)))
 
@@ -258,6 +352,11 @@ public enum MeshLoaderService {
 
                 offset += 50
             }
+        }
+
+        if positions.isEmpty {
+            minBounds = .zero
+            maxBounds = .zero
         }
 
         let (volumeMm3, areaMm2) = computeVolumeAndSurfaceArea(
@@ -298,7 +397,8 @@ public enum MeshLoaderService {
                 if parts.count >= 4,
                    let x = Float(parts[1]),
                    let y = Float(parts[2]),
-                   let z = Float(parts[3]) {
+                   let z = Float(parts[3]),
+                   x.isFinite, y.isFinite, z.isFinite {
                     currentVerts.append(SIMD3<Float>(x, y, z))
                     if currentVerts.count == 3 {
                         let v1 = currentVerts[0]
@@ -338,51 +438,66 @@ public enum MeshLoaderService {
 
     // MARK: - High-Performance Native 3MF Archive & Parallel Byte-Level Mesh Parser
 
-    private struct Resolved3MFMeshInstance {
+    private struct Resolved3MFMeshInstance: Sendable {
         var vertices: [SIMD3<Float>]
         var triangles: [Int32] // 3 indices per triangle into `vertices`
     }
 
-    private static func load3MF(at url: URL, buildScene: Bool = true) throws -> LoadedMeshScene {
+    @inline(__always)
+    private static func isFiniteVertex(_ v: SIMD3<Float>) -> Bool {
+        v.x.isFinite && v.y.isFinite && v.z.isFinite
+    }
+
+    @inline(__always)
+    private static func safeClampedInt64(_ value: Double) -> Int64 {
+        guard value.isFinite else { return 0 }
+        let clamped = min(max(value, -1e15), 1e15)
+        return Int64(clamped.rounded())
+    }
+
+    private static func load3MF(at url: URL, buildScene: Bool = true) async throws -> LoadedMeshScene {
+        try Task.checkCancellation()
         // 1. Extract all `.model` XML files in ONE single unzip invocation (instead of re-opening the ZIP per mesh!)
         let tempDir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("pv_3mf_load_\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
-        let extractedModelFiles = extractAllModelFiles(from: url, into: tempDir)
+        let extractedModelFiles = try await extractAllModelFiles(from: url, into: tempDir)
         guard !extractedModelFiles.isEmpty else {
-            throw NSError(domain: "MeshLoaderService", code: 404, userInfo: [
-                NSLocalizedDescriptionKey: "No 3D .model files found inside 3MF archive."
-            ])
+            throw MeshLoaderError.noModelFilesIn3MF
         }
 
-        // 2. Parse all extracted `.model` files in parallel across CPU cores using our zero-allocation UTF-8 scanner
-        final class SyncModelMap: @unchecked Sendable {
-            private let lock = NSLock()
-            var models: [String: ThreeMFDocument] = [:]
-            func set(_ key: String, _ doc: ThreeMFDocument) {
-                lock.lock()
-                models[key] = doc
-                lock.unlock()
-            }
-        }
-        let syncModels = SyncModelMap()
+        try Task.checkCancellation()
 
-        DispatchQueue.concurrentPerform(iterations: extractedModelFiles.count) { idx in
-            let (relativePath, fileURL) = extractedModelFiles[idx]
-            guard let xmlData = try? Data(contentsOf: fileURL, options: .mappedIfSafe) else { return }
-            var doc = FastThreeMFByteParser.parse(data: xmlData)
-            if doc == nil || doc!.objects.isEmpty {
-                let fallback = ThreeMFXMLMeshParser()
-                doc = fallback.parseDocument(data: xmlData)
+        // 2. Parse all extracted `.model` files in parallel using structured concurrency
+        let parsedModels: [String: ThreeMFDocument] = await withTaskGroup(
+            of: (String, ThreeMFDocument)?.self,
+            returning: [String: ThreeMFDocument].self
+        ) { group in
+            for (relativePath, fileURL) in extractedModelFiles {
+                group.addTask {
+                    guard !Task.isCancelled else { return nil }
+                    guard let xmlData = try? Data(contentsOf: fileURL, options: .mappedIfSafe) else { return nil }
+                    var doc = FastThreeMFByteParser.parse(data: xmlData)
+                    if doc == nil || doc!.objects.isEmpty {
+                        let fallback = ThreeMFXMLMeshParser()
+                        doc = fallback.parseDocument(data: xmlData)
+                    }
+                    guard let doc else { return nil }
+                    return (normalize3MFPath(relativePath), doc)
+                }
             }
-            if let doc {
-                let key = normalize3MFPath(relativePath)
-                syncModels.set(key, doc)
+            var result: [String: ThreeMFDocument] = [:]
+            for await entry in group {
+                if let (key, doc) = entry {
+                    result[key] = doc
+                }
             }
+            return result
         }
-        let parsedModels = syncModels.models
+
+        try Task.checkCancellation()
 
         let rootKey = parsedModels.keys.first(where: { $0.lowercased() == "3d/3dmodel.model" })
             ?? parsedModels.keys.sorted().first
@@ -405,24 +520,27 @@ public enum MeshLoaderService {
 
             if isIdentity && unitScale == 1.0 {
                 for v in srcVerts {
-                    minBounds = simd_min(minBounds, v)
-                    maxBounds = simd_max(maxBounds, v)
-                    transformedVerts.append(v)
+                    let safeV = isFiniteVertex(v) ? v : .zero
+                    minBounds = simd_min(minBounds, safeV)
+                    maxBounds = simd_max(maxBounds, safeV)
+                    transformedVerts.append(safeV)
                 }
             } else if isIdentity {
                 for v in srcVerts {
                     let sv = v * unitScale
-                    minBounds = simd_min(minBounds, sv)
-                    maxBounds = simd_max(maxBounds, sv)
-                    transformedVerts.append(sv)
+                    let safeV = isFiniteVertex(sv) ? sv : .zero
+                    minBounds = simd_min(minBounds, safeV)
+                    maxBounds = simd_max(maxBounds, safeV)
+                    transformedVerts.append(safeV)
                 }
             } else {
                 for v in srcVerts {
                     let p4 = transform * SIMD4<Float>(v.x, v.y, v.z, 1.0)
                     let sv = SIMD3<Float>(p4.x, p4.y, p4.z) * unitScale
-                    minBounds = simd_min(minBounds, sv)
-                    maxBounds = simd_max(maxBounds, sv)
-                    transformedVerts.append(sv)
+                    let safeV = isFiniteVertex(sv) ? sv : .zero
+                    minBounds = simd_min(minBounds, safeV)
+                    maxBounds = simd_max(maxBounds, safeV)
+                    transformedVerts.append(safeV)
                 }
             }
 
@@ -470,70 +588,68 @@ public enum MeshLoaderService {
         }
 
         guard !instances.isEmpty else {
-            throw NSError(domain: "MeshLoaderService", code: 404, userInfo: [
-                NSLocalizedDescriptionKey: "No 3D mesh geometry found inside 3MF archive."
-            ])
+            throw MeshLoaderError.noMeshGeometryIn3MF
         }
         let resolvedTotalTriangles = instances.reduce(0) { $0 + ($1.triangles.count / 3) }
         guard resolvedTotalTriangles > 0 else {
-            throw NSError(domain: "MeshLoaderService", code: 404, userInfo: [
-                NSLocalizedDescriptionKey: "No 3D mesh geometry found inside 3MF archive."
-            ])
+            throw MeshLoaderError.noMeshGeometryIn3MF
         }
+
+        try Task.checkCancellation()
 
         // 4. Compute exact full-resolution volume (per sub-mesh instance, centroid-shifted) & exact surface area in parallel
-        final class MetricBox: @unchecked Sendable {
-            var volumes: [Double]
-            var areas: [Double]
-            init(count: Int) {
-                self.volumes = [Double](repeating: 0, count: count)
-                self.areas = [Double](repeating: 0, count: count)
+        let (totalVolMm3, totalAreaMm2): (Double, Double) = await withTaskGroup(
+            of: (volume: Double, area: Double).self,
+            returning: (Double, Double).self
+        ) { group in
+            for instance in instances {
+                group.addTask {
+                    let verts = instance.vertices
+                    let tris = instance.triangles
+                    let vCount = verts.count
+                    var instMin = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
+                    var instMax = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
+                    for v in verts {
+                        instMin = simd_min(instMin, v)
+                        instMax = simd_max(instMax, v)
+                    }
+                    let cx = Double(instMin.x + instMax.x) * 0.5
+                    let cy = Double(instMin.y + instMax.y) * 0.5
+                    let cz = Double(instMin.z + instMax.z) * 0.5
+
+                    var instSignedVol: Double = 0
+                    var instArea: Double = 0
+                    var i = 0
+                    while i + 2 < tris.count {
+                        let i1 = Int(tris[i])
+                        let i2 = Int(tris[i + 1])
+                        let i3 = Int(tris[i + 2])
+                        i += 3
+                        guard i1 >= 0, i2 >= 0, i3 >= 0, i1 < vCount, i2 < vCount, i3 < vCount else { continue }
+                        let p1 = verts[i1]
+                        let p2 = verts[i2]
+                        let p3 = verts[i3]
+
+                        let a = SIMD3<Double>(Double(p1.x) - cx, Double(p1.y) - cy, Double(p1.z) - cz)
+                        let b = SIMD3<Double>(Double(p2.x) - cx, Double(p2.y) - cy, Double(p2.z) - cz)
+                        let c = SIMD3<Double>(Double(p3.x) - cx, Double(p3.y) - cy, Double(p3.z) - cz)
+
+                        instArea += 0.5 * simd_length(simd_cross(b - a, c - a))
+                        instSignedVol += simd_dot(a, simd_cross(b, c)) / 6.0
+                    }
+                    return (abs(instSignedVol), instArea)
+                }
             }
+            var volSum: Double = 0
+            var areaSum: Double = 0
+            for await (vol, area) in group {
+                volSum += vol
+                areaSum += area
+            }
+            return (volSum, areaSum)
         }
-        let metricBox = MetricBox(count: instances.count)
-        let capturedInstances = instances
 
-        DispatchQueue.concurrentPerform(iterations: capturedInstances.count) { idx in
-            let instance = capturedInstances[idx]
-            let verts = instance.vertices
-            let tris = instance.triangles
-            let vCount = verts.count
-            var instMin = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
-            var instMax = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
-            for v in verts {
-                instMin = simd_min(instMin, v)
-                instMax = simd_max(instMax, v)
-            }
-            let cx = Double(instMin.x + instMax.x) * 0.5
-            let cy = Double(instMin.y + instMax.y) * 0.5
-            let cz = Double(instMin.z + instMax.z) * 0.5
-
-            var instSignedVol: Double = 0
-            var instArea: Double = 0
-            var i = 0
-            while i + 2 < tris.count {
-                let i1 = Int(tris[i])
-                let i2 = Int(tris[i + 1])
-                let i3 = Int(tris[i + 2])
-                i += 3
-                guard i1 >= 0, i2 >= 0, i3 >= 0, i1 < vCount, i2 < vCount, i3 < vCount else { continue }
-                let p1 = verts[i1]
-                let p2 = verts[i2]
-                let p3 = verts[i3]
-
-                let a = SIMD3<Double>(Double(p1.x) - cx, Double(p1.y) - cy, Double(p1.z) - cz)
-                let b = SIMD3<Double>(Double(p2.x) - cx, Double(p2.y) - cy, Double(p2.z) - cz)
-                let c = SIMD3<Double>(Double(p3.x) - cx, Double(p3.y) - cy, Double(p3.z) - cz)
-
-                instArea += 0.5 * simd_length(simd_cross(b - a, c - a))
-                instSignedVol += simd_dot(a, simd_cross(b, c)) / 6.0
-            }
-            metricBox.volumes[idx] = abs(instSignedVol)
-            metricBox.areas[idx] = instArea
-        }
-
-        let totalVolMm3 = metricBox.volumes.reduce(0, +)
-        let totalAreaMm2 = metricBox.areas.reduce(0, +)
+        try Task.checkCancellation()
 
         let dx = Double(max(0, maxBounds.x - minBounds.x))
         let dy = Double(max(0, maxBounds.y - minBounds.y))
@@ -557,7 +673,7 @@ public enum MeshLoaderService {
         // 5. Build fast packed Float32 indexed SceneKit geometry (with watertight vertex-clustering LOD if > 500k triangles)
         let rootNode: SCNNode
         if totalTriangles > previewLODTriangleThreshold {
-            rootNode = buildClusteredPreviewNode(
+            rootNode = await buildClusteredPreviewNode(
                 instances: instances,
                 minBounds: minBounds,
                 maxBounds: maxBounds
@@ -570,6 +686,7 @@ public enum MeshLoaderService {
             )
         }
 
+        try Task.checkCancellation()
         return LoadedMeshScene(rootNode: rootNode, metadata: metadata, embeddedThumbnail: nil)
     }
 
@@ -615,9 +732,7 @@ public enum MeshLoaderService {
         countGeometry(rootNode)
 
         guard totalTris > 0 || totalVerts > 0 else {
-            throw NSError(domain: "MeshLoaderService", code: 422, userInfo: [
-                NSLocalizedDescriptionKey: "Unable to parse 3D geometry from \(url.lastPathComponent)."
-            ])
+            throw MeshLoaderError.unableToParseGeometry(fileName: url.lastPathComponent)
         }
 
         let (bMin, bMax) = rootNode.boundingBox
@@ -658,9 +773,9 @@ public enum MeshLoaderService {
         let z: Int64
 
         init(_ p: SIMD3<Float>) {
-            self.x = Int64((Double(p.x) * 100.0).rounded())
-            self.y = Int64((Double(p.y) * 100.0).rounded())
-            self.z = Int64((Double(p.z) * 100.0).rounded())
+            self.x = MeshLoaderService.safeClampedInt64(Double(p.x) * 100.0)
+            self.y = MeshLoaderService.safeClampedInt64(Double(p.y) * 100.0)
+            self.z = MeshLoaderService.safeClampedInt64(Double(p.z) * 100.0)
         }
     }
 
@@ -772,7 +887,7 @@ public enum MeshLoaderService {
 
     // MARK: - Packed Float32 SceneKit Geometry Builders + Watertight Vertex-Clustering LOD
 
-    private struct PackedFloat3 {
+    private struct PackedFloat3: Sendable {
         var x: Float
         var y: Float
         var z: Float
@@ -873,27 +988,9 @@ public enum MeshLoaderService {
             }
         }
 
-        let vertexSource = makeFloat3GeometrySource(packedVerts, semantic: .vertex)
-        let normalSource = makeFloat3GeometrySource(packedNormals, semantic: .normal)
         var indices = [Int32](repeating: 0, count: packedVerts.count)
         for idx in 0..<packedVerts.count { indices[idx] = Int32(idx) }
-        let indexData = indices.withUnsafeBytes { Data($0) }
-
-        let element = SCNGeometryElement(
-            data: indexData,
-            primitiveType: .triangles,
-            primitiveCount: packedVerts.count / 3,
-            bytesPerIndex: MemoryLayout<Int32>.size
-        )
-
-        let geometry = SCNGeometry(sources: [vertexSource, normalSource], elements: [element])
-        geometry.firstMaterial = defaultPrintMaterial()
-
-        let meshNode = SCNNode(geometry: geometry)
-        meshNode.name = "PrintMeshNode"
-
-        let rootNode = SCNNode()
-        rootNode.addChildNode(meshNode)
+        let rootNode = makeSceneRootNode(verts: packedVerts, normals: packedNormals, indices: indices)
         return LoadedMeshScene(rootNode: rootNode, metadata: metadata, embeddedThumbnail: nil)
     }
 
@@ -967,7 +1064,7 @@ public enum MeshLoaderService {
         instances: [Resolved3MFMeshInstance],
         minBounds: SIMD3<Float>,
         maxBounds: SIMD3<Float>
-    ) -> SCNNode {
+    ) async -> SCNNode {
         let centerX = (minBounds.x + maxBounds.x) * 0.5
         let centerY = (minBounds.y + maxBounds.y) * 0.5
         let baseZ = minBounds.z
@@ -976,115 +1073,122 @@ public enum MeshLoaderService {
         let ratio = Float(previewLODTriangleThreshold) / Float(max(totalTris, 1))
         let gridSteps = max(96.0, min(320.0, 280.0 * sqrt(ratio)))
 
-        struct ClusteredPart {
+        struct ClusteredPart: Sendable {
             var verts: [PackedFloat3] = []
             var normals: [PackedFloat3] = []
             var indices: [Int32] = []
         }
 
-        final class PartsBox: @unchecked Sendable {
-            var parts: [ClusteredPart]
-            init(count: Int) { self.parts = Array(repeating: ClusteredPart(), count: count) }
-        }
-        let box = PartsBox(count: instances.count)
-        let capturedInstances = instances
+        // Cluster each sub-mesh independently in parallel using structured concurrency
+        let parts: [ClusteredPart] = await withTaskGroup(
+            of: (Int, ClusteredPart).self,
+            returning: [ClusteredPart].self
+        ) { group in
+            for (idx, inst) in instances.enumerated() {
+                group.addTask {
+                    let verts = inst.vertices
+                    let tris = inst.triangles
+                    let vCount = verts.count
+                    guard vCount > 0, tris.count >= 3, !Task.isCancelled else {
+                        return (idx, ClusteredPart())
+                    }
 
-        // Cluster each sub-mesh independently in parallel across CPU cores
-        DispatchQueue.concurrentPerform(iterations: capturedInstances.count) { idx in
-            let inst = capturedInstances[idx]
-            let verts = inst.vertices
-            let tris = inst.triangles
-            let vCount = verts.count
-            guard vCount > 0, tris.count >= 3 else { return }
+                    var iMin = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
+                    var iMax = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
+                    for v in verts {
+                        iMin = simd_min(iMin, v)
+                        iMax = simd_max(iMax, v)
+                    }
+                    let span = max(max(iMax.x - iMin.x, iMax.y - iMin.y), max(iMax.z - iMin.z, 1e-3))
+                    let invCell = gridSteps / span
 
-            var iMin = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
-            var iMax = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
-            for v in verts {
-                iMin = simd_min(iMin, v)
-                iMax = simd_max(iMax, v)
-            }
-            let span = max(max(iMax.x - iMin.x, iMax.y - iMin.y), max(iMax.z - iMin.z, 1e-3))
-            let invCell = gridSteps / span
+                    var cellToCluster: [Int64: Int32] = [:]
+                    cellToCluster.reserveCapacity(min(vCount, 65_536))
+                    var clusterSum = [SIMD3<Float>]()
+                    var clusterCount = [Int32]()
+                    var vertToCluster = [Int32](repeating: 0, count: vCount)
 
-            var cellToCluster: [Int64: Int32] = [:]
-            cellToCluster.reserveCapacity(min(vCount, 65_536))
-            var clusterSum = [SIMD3<Float>]()
-            var clusterCount = [Int32]()
-            var vertToCluster = [Int32](repeating: 0, count: vCount)
+                    for vIdx in 0..<vCount {
+                        let p = verts[vIdx]
+                        let gx = safeClampedInt64(Double((p.x - iMin.x) * invCell))
+                        let gy = safeClampedInt64(Double((p.y - iMin.y) * invCell))
+                        let gz = safeClampedInt64(Double((p.z - iMin.z) * invCell))
+                        let key = (gx & 0x1FFFFF) | ((gy & 0x1FFFFF) << 21) | ((gz & 0x1FFFFF) << 42)
+                        if let existing = cellToCluster[key] {
+                            vertToCluster[vIdx] = existing
+                            clusterSum[Int(existing)] += p
+                            clusterCount[Int(existing)] += 1
+                        } else {
+                            let cid = Int32(clusterSum.count)
+                            cellToCluster[key] = cid
+                            vertToCluster[vIdx] = cid
+                            clusterSum.append(p)
+                            clusterCount.append(1)
+                        }
+                    }
 
-            for vIdx in 0..<vCount {
-                let p = verts[vIdx]
-                let gx = Int64((p.x - iMin.x) * invCell)
-                let gy = Int64((p.y - iMin.y) * invCell)
-                let gz = Int64((p.z - iMin.z) * invCell)
-                let key = (gx & 0x1FFFFF) | ((gy & 0x1FFFFF) << 21) | ((gz & 0x1FFFFF) << 42)
-                if let existing = cellToCluster[key] {
-                    vertToCluster[vIdx] = existing
-                    clusterSum[Int(existing)] += p
-                    clusterCount[Int(existing)] += 1
-                } else {
-                    let cid = Int32(clusterSum.count)
-                    cellToCluster[key] = cid
-                    vertToCluster[vIdx] = cid
-                    clusterSum.append(p)
-                    clusterCount.append(1)
+                    let cCount = clusterSum.count
+                    var partVerts = [PackedFloat3]()
+                    var clusterAvg = [SIMD3<Float>]()
+                    var accumNormals = [SIMD3<Float>](repeating: .zero, count: cCount)
+                    partVerts.reserveCapacity(cCount)
+                    clusterAvg.reserveCapacity(cCount)
+
+                    for c in 0..<cCount {
+                        let avg = clusterSum[c] / Float(clusterCount[c])
+                        clusterAvg.append(avg)
+                        partVerts.append(PackedFloat3(x: avg.x - centerX, y: avg.z - baseZ, z: -(avg.y - centerY)))
+                    }
+
+                    var partIndices = [Int32]()
+                    partIndices.reserveCapacity(min(tris.count, cCount * 6))
+                    var i = 0
+                    while i + 2 < tris.count {
+                        let l1 = Int(tris[i])
+                        let l2 = Int(tris[i + 1])
+                        let l3 = Int(tris[i + 2])
+                        i += 3
+                        guard l1 >= 0, l2 >= 0, l3 >= 0, l1 < vCount, l2 < vCount, l3 < vCount else { continue }
+                        let c1 = vertToCluster[l1]
+                        let c2 = vertToCluster[l2]
+                        let c3 = vertToCluster[l3]
+                        if c1 == c2 || c2 == c3 || c1 == c3 { continue }
+
+                        let p1 = clusterAvg[Int(c1)]
+                        let p2 = clusterAvg[Int(c2)]
+                        let p3 = clusterAvg[Int(c3)]
+                        let fn = simd_cross(p2 - p1, p3 - p1)
+
+                        accumNormals[Int(c1)] += fn
+                        accumNormals[Int(c2)] += fn
+                        accumNormals[Int(c3)] += fn
+
+                        partIndices.append(c1)
+                        partIndices.append(c2)
+                        partIndices.append(c3)
+                    }
+
+                    var partNormals = [PackedFloat3]()
+                    partNormals.reserveCapacity(cCount)
+                    for n in accumNormals {
+                        let len = simd_length(n)
+                        let unit = len > 1e-7 ? (n / len) : SIMD3<Float>(0, 0, 1)
+                        partNormals.append(PackedFloat3(x: unit.x, y: unit.z, z: -unit.y))
+                    }
+
+                    return (idx, ClusteredPart(verts: partVerts, normals: partNormals, indices: partIndices))
                 }
             }
 
-            let cCount = clusterSum.count
-            var partVerts = [PackedFloat3]()
-            var clusterAvg = [SIMD3<Float>]()
-            var accumNormals = [SIMD3<Float>](repeating: .zero, count: cCount)
-            partVerts.reserveCapacity(cCount)
-            clusterAvg.reserveCapacity(cCount)
-
-            for c in 0..<cCount {
-                let avg = clusterSum[c] / Float(clusterCount[c])
-                clusterAvg.append(avg)
-                partVerts.append(PackedFloat3(x: avg.x - centerX, y: avg.z - baseZ, z: -(avg.y - centerY)))
+            var ordered = Array(repeating: ClusteredPart(), count: instances.count)
+            for await (idx, part) in group {
+                ordered[idx] = part
             }
-
-            var partIndices = [Int32]()
-            partIndices.reserveCapacity(min(tris.count, cCount * 6))
-            var i = 0
-            while i + 2 < tris.count {
-                let l1 = Int(tris[i])
-                let l2 = Int(tris[i + 1])
-                let l3 = Int(tris[i + 2])
-                i += 3
-                guard l1 >= 0, l2 >= 0, l3 >= 0, l1 < vCount, l2 < vCount, l3 < vCount else { continue }
-                let c1 = vertToCluster[l1]
-                let c2 = vertToCluster[l2]
-                let c3 = vertToCluster[l3]
-                if c1 == c2 || c2 == c3 || c1 == c3 { continue }
-
-                let p1 = clusterAvg[Int(c1)]
-                let p2 = clusterAvg[Int(c2)]
-                let p3 = clusterAvg[Int(c3)]
-                let fn = simd_cross(p2 - p1, p3 - p1)
-
-                accumNormals[Int(c1)] += fn
-                accumNormals[Int(c2)] += fn
-                accumNormals[Int(c3)] += fn
-
-                partIndices.append(c1)
-                partIndices.append(c2)
-                partIndices.append(c3)
-            }
-
-            var partNormals = [PackedFloat3]()
-            partNormals.reserveCapacity(cCount)
-            for n in accumNormals {
-                let len = simd_length(n)
-                let unit = len > 1e-7 ? (n / len) : SIMD3<Float>(0, 0, 1)
-                partNormals.append(PackedFloat3(x: unit.x, y: unit.z, z: -unit.y))
-            }
-
-            box.parts[idx] = ClusteredPart(verts: partVerts, normals: partNormals, indices: partIndices)
+            return ordered
         }
 
-        let totalOutVerts = box.parts.reduce(0) { $0 + $1.verts.count }
-        let totalOutIndices = box.parts.reduce(0) { $0 + $1.indices.count }
+        let totalOutVerts = parts.reduce(0) { $0 + $1.verts.count }
+        let totalOutIndices = parts.reduce(0) { $0 + $1.indices.count }
         var outVerts = [PackedFloat3]()
         var outNormals = [PackedFloat3]()
         var outIndices = [Int32]()
@@ -1092,7 +1196,7 @@ public enum MeshLoaderService {
         outNormals.reserveCapacity(totalOutVerts)
         outIndices.reserveCapacity(totalOutIndices)
 
-        for part in box.parts where !part.indices.isEmpty {
+        for part in parts where !part.indices.isEmpty {
             let baseOffset = Int32(outVerts.count)
             outVerts.append(contentsOf: part.verts)
             outNormals.append(contentsOf: part.normals)
@@ -1127,9 +1231,9 @@ public enum MeshLoaderService {
         outIndices.reserveCapacity(previewLODTriangleThreshold * 3)
 
         func clusterId(for p: SIMD3<Float>) -> Int32 {
-            let gx = Int64((p.x - minBounds.x) * invCell)
-            let gy = Int64((p.y - minBounds.y) * invCell)
-            let gz = Int64((p.z - minBounds.z) * invCell)
+            let gx = safeClampedInt64(Double((p.x - minBounds.x) * invCell))
+            let gy = safeClampedInt64(Double((p.y - minBounds.y) * invCell))
+            let gz = safeClampedInt64(Double((p.z - minBounds.z) * invCell))
             let key = (gx & 0x1FFFFF) | ((gy & 0x1FFFFF) << 21) | ((gz & 0x1FFFFF) << 42)
             if let existing = cellToCluster[key] {
                 clusterSum[Int(existing)] += p
@@ -1228,23 +1332,81 @@ public enum MeshLoaderService {
         return material
     }
 
+    /// Adds the balanced 3-point studio lighting rig shared by interactive 3D previews and offscreen thumbnail snapshots.
+    public static func addStudioLighting(to scene: SCNScene) {
+        let keyLightNode = SCNNode()
+        let keyLight = SCNLight()
+        keyLight.type = .directional
+        keyLight.intensity = 900
+        keyLightNode.light = keyLight
+        keyLightNode.eulerAngles = SCNVector3(-Float.pi / 3, Float.pi / 4, 0)
+        scene.rootNode.addChildNode(keyLightNode)
+
+        let fillLightNode = SCNNode()
+        let fillLight = SCNLight()
+        fillLight.type = .directional
+        fillLight.intensity = 340
+        fillLight.color = NSColor(calibratedRed: 0.85, green: 0.90, blue: 1.0, alpha: 1.0)
+        fillLightNode.light = fillLight
+        fillLightNode.eulerAngles = SCNVector3(-Float.pi / 5, -Float.pi * 0.65, 0)
+        scene.rootNode.addChildNode(fillLightNode)
+
+        let rimLightNode = SCNNode()
+        let rimLight = SCNLight()
+        rimLight.type = .directional
+        rimLight.intensity = 280
+        rimLightNode.light = rimLight
+        rimLightNode.eulerAngles = SCNVector3(-Float.pi / 6, Float.pi * 0.9, 0)
+        scene.rootNode.addChildNode(rimLightNode)
+
+        let ambientNode = SCNNode()
+        let ambient = SCNLight()
+        ambient.type = .ambient
+        ambient.intensity = 220
+        ambient.color = NSColor(calibratedWhite: 0.88, alpha: 1.0)
+        ambientNode.light = ambient
+        scene.rootNode.addChildNode(ambientNode)
+    }
+
     // MARK: - ZIP Extraction Helpers for 3MF
 
-    /// Extracts all `.model` files from a `.3mf` archive in ONE single `/usr/bin/unzip` pass.
-    private static func extractAllModelFiles(from archiveURL: URL, into tempDir: URL) -> [(relativePath: String, fileURL: URL)] {
+    /// Extracts all `.model` files from a `.3mf` archive in ONE single `/usr/bin/unzip` pass, terminating on task cancellation.
+    private static func extractAllModelFiles(from archiveURL: URL, into tempDir: URL) async throws -> [(relativePath: String, fileURL: URL)] {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
         // `-qq` quiet, `-o` overwrite, `-C` case-insensitive wildcard match for `*.model`
         proc.arguments = ["-qq", "-o", "-C", archiveURL.path, "*.model", "-d", tempDir.path]
         proc.standardOutput = FileHandle.nullDevice
         proc.standardError = FileHandle.nullDevice
-        do {
-            try proc.run()
-            proc.waitUntilExit()
-        } catch {
-            return []
+
+        let status: Int32 = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                proc.terminationHandler = { process in
+                    continuation.resume(returning: process.terminationStatus)
+                }
+                do {
+                    try proc.run()
+                } catch {
+                    proc.terminationHandler = nil
+                    continuation.resume(throwing: error)
+                }
+            }
+        } onCancel: {
+            if proc.isRunning {
+                proc.terminate()
+            }
         }
 
+        try Task.checkCancellation()
+        // unzip exit codes: 0 = success, 1 = minor warning (e.g. extra bytes), 11 = no matching files
+        if status != 0 && status != 1 && status != 11 {
+            throw MeshLoaderError.zipExtractionFailed(status: status)
+        }
+
+        return collectExtractedModelFiles(in: tempDir)
+    }
+
+    private static func collectExtractedModelFiles(in tempDir: URL) -> [(relativePath: String, fileURL: URL)] {
         let resolvedTempDir = tempDir.resolvingSymlinksInPath().standardizedFileURL
         var results: [(String, URL)] = []
         guard let enumerator = FileManager.default.enumerator(
@@ -1278,7 +1440,8 @@ public enum MeshLoaderService {
             try proc.run()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             proc.waitUntilExit()
-            guard let out = String(data: data, encoding: .utf8) else { return [] }
+            guard proc.terminationStatus == 0 || proc.terminationStatus == 1,
+                  let out = String(data: data, encoding: .utf8) else { return [] }
             return out.split(whereSeparator: \.isNewline).map(String.init)
         } catch {
             return []
@@ -1296,6 +1459,7 @@ public enum MeshLoaderService {
             try proc.run()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             proc.waitUntilExit()
+            guard proc.terminationStatus == 0 || proc.terminationStatus == 1 else { return nil }
             return data.isEmpty ? nil : data
         } catch {
             return nil
@@ -1305,29 +1469,29 @@ public enum MeshLoaderService {
 
 // MARK: - 3MF Document Structures
 
-private struct ThreeMFMesh {
+private struct ThreeMFMesh: Sendable {
     var vertices: [SIMD3<Float>] = []
     var triangles: [Int32] = [] // flat triples (v1, v2, v3)
 }
 
-private struct ThreeMFComponent {
+private struct ThreeMFComponent: Sendable {
     let objectId: String
     let externalPath: String?
     let transform: simd_float4x4
 }
 
-private struct ThreeMFObject {
+private struct ThreeMFObject: Sendable {
     let id: String
     var mesh: ThreeMFMesh?
     var components: [ThreeMFComponent] = []
 }
 
-private struct ThreeMFBuildItem {
+private struct ThreeMFBuildItem: Sendable {
     let objectId: String
     let transform: simd_float4x4
 }
 
-private struct ThreeMFDocument {
+private struct ThreeMFDocument: Sendable {
     var unitToMillimeters: Float = 1.0
     var objects: [String: ThreeMFObject] = [:]
     var buildItems: [ThreeMFBuildItem] = []

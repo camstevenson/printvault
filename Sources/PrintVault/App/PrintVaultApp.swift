@@ -1,6 +1,7 @@
 import SwiftUI
 import SwiftData
 import AppKit
+import os
 
 final class PrintVaultAppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -10,17 +11,22 @@ final class PrintVaultAppDelegate: NSObject, NSApplicationDelegate {
 
 @main
 struct PrintVaultApp: App {
+    private static let logger = Logger(subsystem: "com.printvault.PrintVault", category: "App")
+
     @NSApplicationDelegateAdaptor(PrintVaultAppDelegate.self) private var appDelegate
     let sharedModelContainer: ModelContainer
+    let persistenceWarning: String?
 
     init() {
         // Enforce single running instance BEFORE opening SwiftData SQLite store
         SingleInstanceGuard.shared.enforceSingleInstanceOrTerminate()
-        self.sharedModelContainer = Self.makeModelContainer()
+        let (container, warning) = Self.makeModelContainer()
+        self.sharedModelContainer = container
+        self.persistenceWarning = warning
         NSApplication.shared.setActivationPolicy(.regular)
     }
 
-    private static func makeModelContainer() -> ModelContainer {
+    private static func makeModelContainer() -> (ModelContainer, String?) {
         let schema = Schema([
             PrintFileItem.self,
             PrintCategory.self,
@@ -28,16 +34,24 @@ struct PrintVaultApp: App {
         ])
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
         do {
-            return try ModelContainer(for: schema, configurations: [modelConfiguration])
+            let container = try ModelContainer(for: schema, configurations: [modelConfiguration])
+            return (container, nil)
         } catch {
+            logger.fault("Failed to open persistent SwiftData store: \(error.localizedDescription, privacy: .public). Falling back to temporary in-memory store.")
             let fallbackConfig = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
-            return try! ModelContainer(for: schema, configurations: [fallbackConfig])
+            do {
+                let container = try ModelContainer(for: schema, configurations: [fallbackConfig])
+                let warning = "Library database could not be opened (\(error.localizedDescription)). Running in temporary in-memory mode — changes will not be saved when you quit."
+                return (container, warning)
+            } catch let fallbackError {
+                fatalError("Unable to initialize SwiftData ModelContainer (persistent: \(error), fallback: \(fallbackError))")
+            }
         }
     }
 
     var body: some Scene {
         Window("PrintVault — 3D Print Library & Slicer Hub", id: "main") {
-            ContentView()
+            ContentView(persistenceWarning: persistenceWarning)
                 .frame(minWidth: 1080, minHeight: 680)
         }
         .modelContainer(sharedModelContainer)

@@ -712,10 +712,21 @@ private struct SuggestionRowView: View {
                         if let existing = categories.first(where: { $0.name == newName }) {
                             suggestion.matchedCategoryID = existing.id
                             suggestion.isNewCategory = false
+                            if !suggestion.isApplied && suggestion.errorMessage == nil {
+                                suggestion.isSelected = true
+                            }
+                        } else if newName == "Uncategorized" {
+                            suggestion.matchedCategoryID = nil
+                            suggestion.isNewCategory = false
+                            suggestion.isSelected = false
                         }
                     }
                 )) {
-                    if suggestion.isNewCategory && !categories.contains(where: { $0.name == suggestion.suggestedCategoryName }) {
+                    if suggestion.suggestedCategoryName == "Uncategorized" {
+                        Text("Uncategorized")
+                            .tag("Uncategorized")
+                        Divider()
+                    } else if suggestion.isNewCategory && !categories.contains(where: { $0.name == suggestion.suggestedCategoryName }) {
                         Label("\(suggestion.suggestedCategoryName) (New)", systemImage: "sparkles")
                             .tag(suggestion.suggestedCategoryName)
                         Divider()
@@ -733,13 +744,16 @@ private struct SuggestionRowView: View {
         }
         .padding(.vertical, 3)
         .task(id: suggestion.itemFilePath) {
-            if let cached = ThumbnailService.shared.cachedThumbnail(for: suggestion.itemFilePath) {
+            let thumbSize = CGSize(width: 96, height: 72)
+            if let cached = ThumbnailService.shared.cachedThumbnail(for: suggestion.itemFilePath, size: thumbSize) {
                 thumb = cached
-            } else {
-                thumb = await ThumbnailService.shared.thumbnail(
-                    for: URL(fileURLWithPath: suggestion.itemFilePath),
-                    size: CGSize(width: 96, height: 72)
-                )
+            }
+            let loaded = await ThumbnailService.shared.thumbnail(
+                for: URL(fileURLWithPath: suggestion.itemFilePath),
+                size: thumbSize
+            )
+            if !Task.isCancelled {
+                thumb = loaded
             }
         }
     }

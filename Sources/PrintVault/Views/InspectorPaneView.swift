@@ -19,8 +19,13 @@ struct InspectorPaneView: View {
     @State private var newTagText: String = ""
     @State private var slicerFeedbackBanner: String?
     @State private var showExpandedPreview: Bool = false
-    @State private var isClassifyingWithAI: Bool = false
+    @State private var classifyingItemPath: String?
+    @State private var aiClassificationTask: Task<Void, Never>?
     @State private var aiFeedbackText: String?
+
+    private var isClassifyingCurrentItem: Bool {
+        classifyingItemPath == item.filePath
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -107,7 +112,7 @@ struct InspectorPaneView: View {
                             Label("Category & Status", systemImage: "folder.badge.gearshape")
                                 .font(.subheadline.weight(.semibold))
                             Spacer()
-                            if isClassifyingWithAI {
+                            if isClassifyingCurrentItem {
                                 HStack(spacing: 5) {
                                     ProgressView()
                                         .controlSize(.mini)
@@ -175,8 +180,10 @@ struct InspectorPaneView: View {
                                 .font(.subheadline.weight(.semibold))
                             Spacer()
                             Button {
-                                FinderTagService.syncToFinder(for: item)
-                                slicerFeedbackBanner = "Synced tags & category to macOS Finder."
+                                let synced = FinderTagService.syncToFinder(for: item)
+                                slicerFeedbackBanner = synced
+                                    ? "Synced tags & category to macOS Finder."
+                                    : "Failed to write macOS Finder tags (file missing or read-only)."
                             } label: {
                                 Label("Push to Finder", systemImage: "arrow.up.doc")
                             }
@@ -383,6 +390,13 @@ struct InspectorPaneView: View {
         }
         .onChange(of: item.filePath) { _, _ in
             aiFeedbackText = nil
+            slicerFeedbackBanner = nil
+            newTagText = ""
+        }
+        .onDisappear {
+            aiClassificationTask?.cancel()
+            aiClassificationTask = nil
+            classifyingItemPath = nil
         }
     }
 
@@ -495,7 +509,7 @@ struct InspectorPaneView: View {
                                 }
                             } label: {
                                 Label(
-                                    profile.isInstalled ? profile.name : "\(profile.name) (Configure Path)",
+                                    slicerService.isInstalled(profile) ? profile.name : "\(profile.name) (Configure Path)",
                                     systemImage: profile.iconSystemName
                                 )
                             }
@@ -550,18 +564,30 @@ struct InspectorPaneView: View {
     }
 
     private func runSingleItemAICategorize() {
-        guard !isClassifyingWithAI else { return }
-        isClassifyingWithAI = true
+        let targetItem = item
+        let targetPath = targetItem.filePath
+        guard classifyingItemPath != targetPath else { return }
+
+        aiClassificationTask?.cancel()
+        classifyingItemPath = targetPath
         aiFeedbackText = nil
 
-        let targetItem = item
-        Task {
-            defer { isClassifyingWithAI = false }
+        let capturedGroup = containingGroup
+        let capturedFolders = watchedFolderPaths
+
+        aiClassificationTask = Task {
+            defer {
+                if classifyingItemPath == targetPath {
+                    classifyingItemPath = nil
+                }
+            }
+
             if case .connected = vlmService.connectionState {
                 // Already connected
             } else {
                 await vlmService.detectLocalRuntimes()
             }
+            guard !Task.isCancelled else { return }
 
             guard case .connected = vlmService.connectionState, !vlmService.config.selectedModel.isEmpty else {
                 // Open the full AI Auto-Categorize sheet so the user can 1-click Start Ollama or Download qwen2.5vl:3b
@@ -569,28 +595,36 @@ struct InspectorPaneView: View {
                 return
             }
 
+            let liveCategories = (try? modelContext.fetch(FetchDescriptor<PrintCategory>(sortBy: [SortDescriptor(\.sortOrder)]))) ?? categories
             let suggestion = await vlmService.classifySingleItem(
                 targetItem,
-                existingCategories: categories,
-                containingGroup: containingGroup,
-                watchedFolderPaths: watchedFolderPaths
+                existingCategories: liveCategories,
+                containingGroup: capturedGroup,
+                watchedFolderPaths: capturedFolders
             )
+            guard !Task.isCancelled else { return }
+
             if let err = suggestion.errorMessage {
-                aiFeedbackText = err
+                if item.filePath == targetPath {
+                    aiFeedbackText = err
+                }
                 return
             }
 
+            let refreshedCategories = (try? modelContext.fetch(FetchDescriptor<PrintCategory>(sortBy: [SortDescriptor(\.sortOrder)]))) ?? liveCategories
             let applied = vlmService.applySingleSuggestion(
                 suggestion,
                 to: targetItem,
-                existingCategories: categories,
+                existingCategories: refreshedCategories,
                 context: modelContext
             )
             if applied {
                 try? modelContext.save()
-                let pct = Int((suggestion.confidence * 100).rounded())
-                aiFeedbackText = "\(suggestion.suggestedCategoryName) (\(pct)%)" + (suggestion.summary.isEmpty ? "" : " — \(suggestion.summary)")
-            } else {
+                if item.filePath == targetPath {
+                    let pct = Int((suggestion.confidence * 100).rounded())
+                    aiFeedbackText = "\(suggestion.suggestedCategoryName) (\(pct)%)" + (suggestion.summary.isEmpty ? "" : " — \(suggestion.summary)")
+                }
+            } else if item.filePath == targetPath {
                 aiFeedbackText = "No category match found."
             }
         }

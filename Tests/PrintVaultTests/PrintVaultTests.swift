@@ -917,4 +917,123 @@ struct PrintVaultTests {
         let towerGroup = groups.first { $0.title == "Tower" }
         #expect(towerGroup?.items.count == 3)
     }
+
+    // MARK: - Regression Tests for Concurrency, Process Safety & Data Flows
+
+    @Test("SlicerService URL template percent-encodes &, =, and + so category names do not split query params")
+    @MainActor
+    func slicerURLTemplateEncodesQueryDelimiters() {
+        let cat = PrintCategory(name: "Organizers & Gridfinity", sortOrder: 0)
+        let item = PrintFileItem(
+            filePath: "/tmp/A&B=C+1.stl",
+            fileName: "A&B=C+1.stl",
+            fileExtension: "stl",
+            fileSize: 100,
+            dateModified: Date(),
+            discoverySource: .manual,
+            category: cat
+        )
+
+        let expanded = SlicerService.expandURLTemplate(
+            template: "shortcuts://run-shortcut?name=Log&category={category}&file={file}",
+            items: [item],
+            slicerName: "Bambu Studio"
+        )
+        #expect(expanded.contains("category=Organizers%20%26%20Gridfinity"))
+        #expect(expanded.contains("file=/tmp/A%26B%3DC%2B1.stl"))
+        #expect(URL(string: expanded) != nil)
+    }
+
+    @Test("SlicerService executeShellCommand drains >128KB stderr and stdout concurrently without deadlocking")
+    func slicerShellCommandLargeStderrDoesNotDeadlock() async {
+        let cmd = "python3 -c 'import sys; sys.stderr.write(\"E\" * 150000); sys.stderr.flush(); sys.stdout.write(\"O\" * 150000); sys.stdout.flush()'"
+        let (ok, output) = await SlicerService.executeShellCommand(cmd)
+        #expect(ok == true)
+        #expect(output.count >= 300_000)
+    }
+
+    @Test("VLM parseSuggestion leaves unrecognized category Uncategorized & unselected when allowNewCategories is false")
+    @MainActor
+    func vlmUnrecognizedCategoryDoesNotFallbackToFirst() {
+        let categories = PrintCategory.defaultSeeds.enumerated().map { idx, seed in
+            PrintCategory(name: seed.name, iconName: seed.icon, colorHex: seed.hex, sortOrder: idx)
+        }
+
+        let suggestion = VLMCategorizerService.parseSuggestion(
+            from: "{\"category\": \"Completely Unknown Niche\", \"isNewCategory\": true, \"confidence\": 0.96, \"tags\": [\"niche\"], \"summary\": \"Unknown.\"}",
+            itemFilePath: "/tmp/mystery.stl",
+            fileName: "mystery.stl",
+            existingCategories: categories,
+            allowNewCategories: false,
+            confidenceThreshold: 0.78,
+            elapsedSeconds: 0.3
+        )
+        #expect(suggestion.errorMessage == nil)
+        #expect(suggestion.suggestedCategoryName == "Uncategorized")
+        #expect(suggestion.matchedCategoryID == nil)
+        #expect(suggestion.isNewCategory == false)
+        #expect(suggestion.isSelected == false)
+    }
+
+    @Test("MeshLoaderService skips non-finite STL vertices safely and clones independent geometries")
+    func meshLoaderNonFiniteVerticesAndIndependentGeometryClone() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        var tris = SampleMeshGenerator.makeBoxTriangles(
+            min: SIMD3<Float>(0, 0, 0),
+            max: SIMD3<Float>(10, 10, 10)
+        )
+        // Inject a malformed triangle with NaN/Inf coordinates
+        tris.append((SIMD3<Float>(.nan, 0, 0), SIMD3<Float>(.infinity, 1, 2), SIMD3<Float>(0, 0, 1)))
+
+        let url = dir.appendingPathComponent("nan_vertex_test.stl")
+        #expect(SampleMeshGenerator.writeBinarySTL(triangles: tris, headerText: "NaN Test", to: url))
+
+        let loaded = try await MeshLoaderService.loadMesh(at: url)
+        #expect(loaded.metadata.triangleCount == 12)
+        #expect(abs(loaded.metadata.dimensionX - 10.0) < 0.01)
+
+        // Mutating a clone's material must not mutate the cached rootNode's geometry material
+        let cloneA = MeshLoaderService.cloneWithIndependentGeometry(loaded.rootNode)
+        let cloneB = MeshLoaderService.cloneWithIndependentGeometry(loaded.rootNode)
+        let origGeo = loaded.rootNode.childNodes.first?.geometry
+        let geoA = cloneA.childNodes.first?.geometry
+        let geoB = cloneB.childNodes.first?.geometry
+        #expect(origGeo !== geoA)
+        #expect(geoA !== geoB)
+    }
+
+    @Test("FileScannerService analyzeUnprocessedMeshes marks failed files with sentinel so they are not re-analyzed forever")
+    @MainActor
+    func meshAnalysisDoesNotLoopOnMissingFiles() async throws {
+        let schema = Schema([PrintFileItem.self, PrintCategory.self, WatchedFolder.self])
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
+        )
+        let ctx = container.mainContext
+
+        let missing = PrintFileItem(
+            filePath: "/tmp/does_not_exist_\(UUID().uuidString).stl",
+            fileName: "missing.stl",
+            fileExtension: "stl",
+            fileSize: 100,
+            dateModified: Date()
+        )
+        ctx.insert(missing)
+        try ctx.save()
+
+        let scanner = FileScannerService()
+        await scanner.analyzeUnprocessedMeshes(context: ctx)
+
+        #expect(missing.meshAnalyzed == true)
+        #expect(missing.surfaceAreaCm2 < 0)
+
+        // Ensure the pending predicate no longer selects this item
+        let pending = try ctx.fetch(FetchDescriptor<PrintFileItem>(
+            predicate: #Predicate { $0.meshAnalyzed == false || $0.surfaceAreaCm2 == 0 }
+        ))
+        #expect(pending.isEmpty)
+    }
 }

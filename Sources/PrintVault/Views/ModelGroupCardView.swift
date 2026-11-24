@@ -200,16 +200,12 @@ struct ModelGroupCardView: View {
         .contextMenu {
             contextMenuItems
         }
-        .task(id: "\(group.primaryItem.filePath)|\(thumbnailGeneration)") {
-            if let cached = ThumbnailService.shared.cachedThumbnail(for: group.primaryItem.filePath) {
-                if thumbnailImage !== cached {
-                    thumbnailImage = cached
-                }
-                return
+        .task(id: "\(group.primaryItem.filePath)|\(group.primaryItem.dateModified.timeIntervalSince1970)|\(thumbnailGeneration)") {
+            if let cached = ThumbnailService.shared.cachedThumbnail(for: group.primaryItem.filePath), thumbnailImage !== cached {
+                thumbnailImage = cached
             }
-            thumbnailImage = nil
             let loaded = await ThumbnailService.shared.thumbnail(for: group.primaryItem.fileURL)
-            if !Task.isCancelled, let loaded {
+            if !Task.isCancelled {
                 thumbnailImage = loaded
             }
         }
