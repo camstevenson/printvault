@@ -2,8 +2,15 @@ import SwiftUI
 import SwiftData
 import AppKit
 
+final class PrintVaultAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        true
+    }
+}
+
 @main
 struct PrintVaultApp: App {
+    @NSApplicationDelegateAdaptor(PrintVaultAppDelegate.self) private var appDelegate
     let sharedModelContainer: ModelContainer
 
     init() {
@@ -37,6 +44,8 @@ struct PrintVaultApp: App {
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified)
         .commands {
+            CommandGroup(replacing: .saveItem) {}
+
             CommandGroup(after: .newItem) {
                 Button("Import 3D Files or Folder...") {
                     NotificationCenter.default.post(name: .printVaultImportFiles, object: nil)
