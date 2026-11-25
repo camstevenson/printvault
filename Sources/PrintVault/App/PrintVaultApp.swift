@@ -24,6 +24,12 @@ struct PrintVaultApp: App {
         self.sharedModelContainer = container
         self.persistenceWarning = warning
         NSApplication.shared.setActivationPolicy(.regular)
+        #if SWIFT_PACKAGE
+        if let iconURL = Bundle.module.url(forResource: "AppIcon", withExtension: "icns"),
+           let iconImage = NSImage(contentsOf: iconURL) {
+            NSApplication.shared.applicationIconImage = iconImage
+        }
+        #endif
     }
 
     private static func makeModelContainer() -> (ModelContainer, String?) {

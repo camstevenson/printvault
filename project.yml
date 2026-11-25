@@ -10,11 +10,14 @@ targets:
     type: application
     platform: macOS
     sources:
-      - Sources/PrintVault
+      - path: Sources/PrintVault
+        excludes:
+          - Resources/AppIcon.icns
     settings:
       base:
         SWIFT_VERSION: "6.0"
         ENABLE_PREVIEWS: "YES"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_FILE: Sources/PrintVault/App/Info.plist
         PRODUCT_BUNDLE_IDENTIFIER: com.printvault.PrintVault
         MARKETING_VERSION: "1.0.0"

@@ -15,7 +15,11 @@ let package = Package(
             path: "Sources/PrintVault",
             exclude: [
                 "App/Info.plist",
-                "App/PrintVault.entitlements"
+                "App/PrintVault.entitlements",
+                "Resources/Assets.xcassets"
+            ],
+            resources: [
+                .copy("Resources/AppIcon.icns")
             ]
         ),
         .testTarget(
