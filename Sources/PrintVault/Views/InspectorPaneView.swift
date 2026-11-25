@@ -73,6 +73,7 @@ struct InspectorPaneView: View {
                         Spacer()
                         Button {
                             item.isFavorite.toggle()
+                            try? modelContext.save()
                         } label: {
                             Image(systemName: item.isFavorite ? "heart.fill" : "heart")
                                 .foregroundStyle(item.isFavorite ? .red : .secondary)
@@ -91,6 +92,7 @@ struct InspectorPaneView: View {
                         ForEach(1...5, id: \.self) { star in
                             Button {
                                 item.rating = (item.rating == star) ? 0 : star
+                                try? modelContext.save()
                             } label: {
                                 Image(systemName: star <= item.rating ? "star.fill" : "star")
                                     .foregroundStyle(star <= item.rating ? .yellow : .secondary.opacity(0.5))
@@ -199,6 +201,7 @@ struct InspectorPaneView: View {
                                             .font(.caption)
                                         Button {
                                             item.tags.removeAll { $0 == tag }
+                                            try? modelContext.save()
                                         } label: {
                                             Image(systemName: "xmark.circle.fill")
                                                 .font(.caption2)
@@ -559,6 +562,7 @@ struct InspectorPaneView: View {
         guard !trimmed.isEmpty else { return }
         if !item.tags.contains(trimmed) {
             item.tags.append(trimmed)
+            try? modelContext.save()
         }
         newTagText = ""
     }

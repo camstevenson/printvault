@@ -1036,4 +1036,48 @@ struct PrintVaultTests {
         ))
         #expect(pending.isEmpty)
     }
+
+    @Test("ModelGroupingService.groupItemsAsync produces identical groups off the main actor")
+    @MainActor
+    func asyncGroupingMatchesSyncGrouping() async {
+        let watched = ["/Users/tester/Downloads"]
+        let items = [
+            makeTestItem(path: "/Users/tester/Downloads/Castle_123456/files/wall.stl", fileSize: 10_000),
+            makeTestItem(path: "/Users/tester/Downloads/Castle_123456/files/tower.stl", fileSize: 20_000),
+            makeTestItem(path: "/Users/tester/Downloads/dragon_part_1.stl", fileSize: 15_000),
+            makeTestItem(path: "/Users/tester/Downloads/dragon_part_2.stl", fileSize: 12_000),
+            makeTestItem(path: "/Users/tester/Downloads/solo_clip.stl", fileSize: 5_000)
+        ]
+
+        let syncEntries = ModelGroupingService.groupItems(items, watchedFolderPaths: watched)
+        let asyncEntries = await ModelGroupingService.groupItemsAsync(items, watchedFolderPaths: watched)
+
+        #expect(asyncEntries.map(\.id) == syncEntries.map(\.id))
+        #expect(asyncEntries.map { $0.allItems.map(\.filePath) } == syncEntries.map { $0.allItems.map(\.filePath) })
+    }
+
+    @Test("ThumbnailService isolates cache entries by target size so small AI-sheet previews never pollute grid cards")
+    @MainActor
+    func thumbnailServiceIsolatesBySizeAndMtime() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let cubeURL = dir.appendingPathComponent("SizeCacheTest.stl")
+        let tris = SampleMeshGenerator.makeBoxTriangles(
+            min: SIMD3<Float>(-10, -10, 0),
+            max: SIMD3<Float>(10, 10, 20)
+        )
+        #expect(SampleMeshGenerator.writeBinarySTL(triangles: tris, headerText: "Thumb Test", to: cubeURL))
+
+        ThumbnailService.shared.clearCache()
+
+        let smallSize = CGSize(width: 96, height: 72)
+        let gridSize = CGSize(width: 240, height: 180)
+        let smallThumb = await ThumbnailService.shared.thumbnail(for: cubeURL, size: smallSize)
+        #expect(smallThumb != nil)
+
+        // Small AI-sheet thumbnail must NOT satisfy a cache lookup for the larger grid card size
+        #expect(ThumbnailService.shared.cachedThumbnail(for: cubeURL.path, size: smallSize) != nil)
+        #expect(ThumbnailService.shared.cachedThumbnail(for: cubeURL.path, size: gridSize) == nil)
+    }
 }

@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftData
 import SceneKit
 import AppKit
 import simd
@@ -71,6 +72,7 @@ struct FilamentMaterialPreset: Identifiable, Equatable {
 // MARK: - Preview3DView
 
 struct Preview3DView: View {
+    @Environment(\.modelContext) private var modelContext
     let item: PrintFileItem
     var onExpand: (() -> Void)? = nil
 
@@ -280,9 +282,10 @@ struct Preview3DView: View {
                 item.dimensionY = result.metadata.dimensionY
                 item.dimensionZ = result.metadata.dimensionZ
                 item.estimatedVolumeCm3 = result.metadata.volumeCm3
-                item.surfaceAreaCm2 = result.metadata.surfaceAreaCm2
+                item.surfaceAreaCm2 = result.metadata.surfaceAreaCm2 > 0 ? result.metadata.surfaceAreaCm2 : -1
                 item.embeddedSubModelCount = result.metadata.subModelCount
                 item.meshAnalyzed = true
+                try? modelContext.save()
             }
         } catch {
             guard !Task.isCancelled else { return }

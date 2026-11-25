@@ -123,6 +123,7 @@ public final class VLMCategorizerService {
 
     private var activeTask: Task<Void, Never>?
     private var pullTask: Task<Void, Never>?
+    private var detectTask: Task<Void, Never>?
     private var detectGeneration: Int = 0
     private var pullGeneration: Int = 0
     private var batchGeneration: Int = 0
@@ -197,9 +198,33 @@ public final class VLMCategorizerService {
 
     // MARK: - Auto-Detection & Ollama Startup / Model Pull
 
-    public func detectLocalRuntimes(preferCurrentBackend: Bool = false) async {
+    public func triggerDetectLocalRuntimes(preferCurrentBackend: Bool = false) {
+        detectTask?.cancel()
         detectGeneration += 1
         let gen = detectGeneration
+        detectTask = Task { [weak self] in
+            guard let self else { return }
+            await self.performDetectLocalRuntimes(preferCurrentBackend: preferCurrentBackend, generation: gen)
+        }
+    }
+
+    public func detectLocalRuntimes(preferCurrentBackend: Bool = false) async {
+        detectTask?.cancel()
+        detectGeneration += 1
+        let gen = detectGeneration
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.performDetectLocalRuntimes(preferCurrentBackend: preferCurrentBackend, generation: gen)
+        }
+        detectTask = task
+        await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    private func performDetectLocalRuntimes(preferCurrentBackend: Bool, generation gen: Int) async {
         connectionState = .checking
         lastError = nil
 

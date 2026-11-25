@@ -2,6 +2,7 @@ import SwiftUI
 import SwiftData
 import AppKit
 import UniformTypeIdentifiers
+import Observation
 
 // MARK: - App Command Notifications
 
@@ -59,8 +60,10 @@ struct ContentView: View {
     private var watchedFolders: [WatchedFolder]
 
     @State private var scanner = FileScannerService()
+    @State private var projection = LibraryProjectionCache()
     private let slicerService = SlicerService.shared
     private let vlmService = VLMCategorizerService.shared
+    private let thumbnailService = ThumbnailService.shared
     @State private var dismissedPersistenceWarning: Bool = false
 
     @State private var sidebarFilter: SidebarFilter? = .all
@@ -83,9 +86,8 @@ struct ContentView: View {
     @State private var categoryColorDraft: Color = .blue
     @State private var expandedPreviewItem: PrintFileItem?
     @State private var thumbnailGeneration: Int = 0
-    @State private var preferEmbedded3MFThumbnails: Bool = ThumbnailService.shared.preferEmbedded3MFThumbnails
 
-    private struct SidebarStats: Equatable {
+    fileprivate struct SidebarStats: Equatable {
         var totalCount = 0
         var favoritesCount = 0
         var uncategorizedCount = 0
@@ -123,74 +125,202 @@ struct ContentView: View {
         }
     }
 
-    private struct CategoryRowSnapshot: Identifiable, Equatable {
+    fileprivate struct CategoryRowSnapshot: Identifiable, Equatable {
         let id: UUID
         let name: String
         let iconName: String
         let count: Int
     }
 
-    private struct WatchedFolderRowSnapshot: Identifiable, Equatable {
+    fileprivate struct WatchedFolderRowSnapshot: Identifiable, Equatable {
         let id: String
         let path: String
         let displayName: String
         let count: Int
     }
 
-    private func computeFilteredItems() -> [PrintFileItem] {
-        let queryLower = searchText.lowercased()
-        let base = allItems.filter { item in
-            switch sidebarFilter ?? .all {
-            case .all:
-                break
-            case .favorites:
-                if !item.isFavorite { return false }
-            case .uncategorized:
-                if item.category != nil { return false }
-            case .recentlySliced:
-                if item.lastSentToSlicerDate == nil { return false }
-            case .format(let fmt):
-                if item.format != fmt { return false }
-            case .status(let st):
-                if item.printStatus != st { return false }
-            case .category(let catID):
-                if item.category?.id != catID { return false }
-            case .folder(let folderPath):
-                if !FileScannerService.matchesFolder(item.filePath, folderPath: folderPath) { return false }
-            case .tag(let tag):
-                if !item.tags.contains(tag) { return false }
+    private struct BrowserProjectionKey: Equatable {
+        let libraryDigest: Int
+        let sidebarFilter: SidebarFilter?
+        let searchText: String
+        let sortOrder: BrowserSortOrder
+        let groupRelatedModels: Bool
+    }
+
+    @MainActor
+    @Observable
+    fileprivate final class LibraryProjectionCache {
+        var stats = SidebarStats()
+        var categorySnapshots: [CategoryRowSnapshot] = []
+        var folderSnapshots: [WatchedFolderRowSnapshot] = []
+        var displayedItems: [PrintFileItem] = []
+        var browserEntries: [BrowserEntry] = []
+        var groupByID: [String: ModelGroup] = [:]
+        var groupByItemPath: [String: ModelGroup] = [:]
+
+        func updateSidebarStats(
+            items: [PrintFileItem],
+            categories: [PrintCategory],
+            folders: [WatchedFolder]
+        ) {
+            let newStats = SidebarStats.build(from: items, folders: folders)
+            stats = newStats
+            categorySnapshots = categories.map { cat in
+                CategoryRowSnapshot(
+                    id: cat.id,
+                    name: cat.name,
+                    iconName: cat.iconName,
+                    count: newStats.categoryCounts[cat.id, default: 0]
+                )
+            }
+            folderSnapshots = folders.map { folder in
+                WatchedFolderRowSnapshot(
+                    id: folder.path,
+                    path: folder.path,
+                    displayName: folder.displayName,
+                    count: newStats.folderCounts[folder.path, default: 0]
+                )
+            }
+        }
+
+        func updateBrowserProjection(
+            allItems: [PrintFileItem],
+            watchedFolderPaths: [String],
+            filter: SidebarFilter?,
+            searchText: String,
+            sortOrder: BrowserSortOrder,
+            groupRelatedModels: Bool
+        ) async {
+            let filtered = Self.filterAndSort(
+                allItems: allItems,
+                filter: filter,
+                searchText: searchText,
+                sortOrder: sortOrder
+            )
+            displayedItems = filtered
+
+            let entries: [BrowserEntry]
+            if groupRelatedModels {
+                let grouped = await ModelGroupingService.groupItemsAsync(
+                    filtered,
+                    watchedFolderPaths: watchedFolderPaths
+                )
+                guard !Task.isCancelled else { return }
+                entries = grouped
+            } else {
+                entries = filtered.map { .single($0) }
             }
 
-            if !queryLower.isEmpty {
-                let matchesName = item.fileName.lowercased().contains(queryLower)
-                let matchesCategory = item.category?.name.lowercased().contains(queryLower) ?? false
-                let matchesTag = item.tags.contains(where: { $0.lowercased().contains(queryLower) })
-                let matchesNotes = item.notes.lowercased().contains(queryLower)
-                if !(matchesName || matchesCategory || matchesTag || matchesNotes) {
-                    return false
+            var byID: [String: ModelGroup] = [:]
+            var byItemPath: [String: ModelGroup] = [:]
+            for entry in entries {
+                if case .group(let group) = entry {
+                    byID[group.id] = group
+                    for member in group.items {
+                        byItemPath[member.filePath] = group
+                    }
                 }
             }
-
-            return true
+            browserEntries = entries
+            groupByID = byID
+            groupByItemPath = byItemPath
         }
 
-        // @Query already returns items sorted by dateModified descending — skip re-sorting for the default sort order!
-        if sortOrder == .dateModified {
-            return base
-        }
+        static func filterAndSort(
+            allItems: [PrintFileItem],
+            filter: SidebarFilter?,
+            searchText: String,
+            sortOrder: BrowserSortOrder
+        ) -> [PrintFileItem] {
+            let queryLower = searchText.lowercased()
+            let base = allItems.filter { item in
+                switch filter ?? .all {
+                case .all:
+                    break
+                case .favorites:
+                    if !item.isFavorite { return false }
+                case .uncategorized:
+                    if item.category != nil { return false }
+                case .recentlySliced:
+                    if item.lastSentToSlicerDate == nil { return false }
+                case .format(let fmt):
+                    if item.format != fmt { return false }
+                case .status(let st):
+                    if item.printStatus != st { return false }
+                case .category(let catID):
+                    if item.category?.id != catID { return false }
+                case .folder(let folderPath):
+                    if !FileScannerService.matchesFolder(item.filePath, folderPath: folderPath) { return false }
+                case .tag(let tag):
+                    if !item.tags.contains(tag) { return false }
+                }
 
-        return base.sorted { a, b in
-            switch sortOrder {
-            case .dateModified:
-                return a.dateModified > b.dateModified
-            case .name:
-                return a.fileName.localizedStandardCompare(b.fileName) == .orderedAscending
-            case .fileSize:
-                return a.fileSize > b.fileSize
-            case .triangles:
-                return a.triangleCount > b.triangleCount
+                if !queryLower.isEmpty {
+                    let matchesName = item.fileName.lowercased().contains(queryLower)
+                    let matchesCategory = item.category?.name.lowercased().contains(queryLower) ?? false
+                    let matchesTag = item.tags.contains(where: { $0.lowercased().contains(queryLower) })
+                    let matchesNotes = item.notes.lowercased().contains(queryLower)
+                    if !(matchesName || matchesCategory || matchesTag || matchesNotes) {
+                        return false
+                    }
+                }
+
+                return true
+            }
+
+            // @Query already returns items sorted by dateModified descending — skip re-sorting for the default sort order!
+            if sortOrder == .dateModified {
+                return base
+            }
+
+            return base.sorted { a, b in
+                switch sortOrder {
+                case .dateModified:
+                    return a.dateModified > b.dateModified
+                case .name:
+                    return a.fileName.localizedStandardCompare(b.fileName) == .orderedAscending
+                case .fileSize:
+                    return a.fileSize > b.fileSize
+                case .triangles:
+                    return a.triangleCount > b.triangleCount
+                }
             }
         }
+    }
+
+    /// Lightweight O(N) hash over observed SwiftData model fields (zero sorting, regexes, or disk I/O)
+    /// so SwiftUI Observation tracks in-place `@Model` edits while skipping expensive recomputation on
+    /// unrelated UI state changes (selection clicks, sheet drafts, inspector toggles).
+    private func computeLibraryDigest() -> Int {
+        var hasher = Hasher()
+        hasher.combine(allItems.count)
+        for item in allItems {
+            hasher.combine(item.filePath)
+            hasher.combine(item.fileName)
+            hasher.combine(item.fileSize)
+            hasher.combine(item.dateModified)
+            hasher.combine(item.isFavorite)
+            hasher.combine(item.category?.id)
+            hasher.combine(item.printStatusRaw)
+            hasher.combine(item.tags)
+            hasher.combine(item.triangleCount)
+            hasher.combine(item.lastSentToSlicerDate)
+            if !searchText.isEmpty {
+                hasher.combine(item.notes)
+            }
+        }
+        hasher.combine(categories.count)
+        for cat in categories {
+            hasher.combine(cat.id)
+            hasher.combine(cat.name)
+            hasher.combine(cat.iconName)
+        }
+        hasher.combine(watchedFolders.count)
+        for folder in watchedFolders {
+            hasher.combine(folder.path)
+            hasher.combine(folder.displayName)
+        }
+        return hasher.finalize()
     }
 
     private func resolveSelectedItem(in displayedItems: [PrintFileItem]) -> PrintFileItem? {
@@ -224,54 +354,27 @@ struct ContentView: View {
     }
 
     var body: some View {
-        let displayedItems = computeFilteredItems()
-        let stats = SidebarStats.build(from: allItems, folders: watchedFolders)
-        let browserEntries: [BrowserEntry] = groupRelatedModels
-            ? ModelGroupingService.groupItems(displayedItems, watchedFolderPaths: watchedFolders.map(\.path))
-            : displayedItems.map { .single($0) }
-        let activeOpenedGroup: ModelGroup? = openedGroupID.flatMap { gid in
-            for entry in browserEntries {
-                if case .group(let group) = entry, group.id == gid {
-                    return group
-                }
-            }
-            return nil
-        }
-        let activeItem = resolveSelectedItem(in: activeOpenedGroup?.items ?? displayedItems)
-        let activeItemGroup: ModelGroup? = activeItem.flatMap { active in
-            for entry in browserEntries {
-                if case .group(let group) = entry,
-                   group.items.contains(where: { $0.filePath == active.filePath }) {
-                    return group
-                }
-            }
-            return nil
-        }
-
-        let categorySnapshots = categories.map { cat in
-            CategoryRowSnapshot(
-                id: cat.id,
-                name: cat.name,
-                iconName: cat.iconName,
-                count: stats.categoryCounts[cat.id, default: 0]
-            )
-        }
-        let folderSnapshots = watchedFolders.map { folder in
-            WatchedFolderRowSnapshot(
-                id: folder.path,
-                path: folder.path,
-                displayName: folder.displayName,
-                count: stats.folderCounts[folder.path, default: 0]
-            )
-        }
+        let libraryDigest = computeLibraryDigest()
+        let projectionKey = BrowserProjectionKey(
+            libraryDigest: libraryDigest,
+            sidebarFilter: sidebarFilter,
+            searchText: searchText,
+            sortOrder: sortOrder,
+            groupRelatedModels: groupRelatedModels
+        )
+        let displayedItems = projection.displayedItems
+        let browserEntries = projection.browserEntries
+        let activeOpenedGroup = openedGroupID.flatMap { projection.groupByID[$0] }
+        let visibleScopeItems = activeOpenedGroup?.items ?? displayedItems
+        let activeItem = resolveSelectedItem(in: visibleScopeItems)
+        let activeItemGroup = activeItem.flatMap { projection.groupByItemPath[$0.filePath] }
 
         NavigationSplitView {
             LibrarySidebarView(
                 selection: $sidebarFilter,
-                selectedValue: sidebarFilter,
-                stats: stats,
-                categories: categorySnapshots,
-                watchedFolders: folderSnapshots,
+                stats: projection.stats,
+                categories: projection.categorySnapshots,
+                watchedFolders: projection.folderSnapshots,
                 onCreateCategory: { beginCreateCategory() },
                 onEditCategory: { catID in
                     if let cat = categories.first(where: { $0.id == catID }) {
@@ -328,14 +431,13 @@ struct ContentView: View {
                     }
                 }
             )
-            .equatable()
             .navigationSplitViewColumnWidth(min: 220, ideal: 245, max: 290)
         } detail: {
             centerBrowserView(
                 displayedItems: displayedItems,
                 browserEntries: browserEntries,
                 activeOpenedGroup: activeOpenedGroup,
-                stats: stats,
+                stats: projection.stats,
                 activeItem: activeItem
             )
             .frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity)
@@ -373,11 +475,29 @@ struct ContentView: View {
             selectedItemPaths.removeAll()
             primarySelectedPath = nil
         }
-        .onChange(of: allItems.count) { _, _ in
-            pruneStaleSelection(validItems: allItems)
-        }
         .onChange(of: groupRelatedModels) { _, isGrouped in
             if !isGrouped {
+                openedGroupID = nil
+            }
+        }
+        .task(id: libraryDigest) {
+            projection.updateSidebarStats(
+                items: allItems,
+                categories: categories,
+                folders: watchedFolders
+            )
+            pruneStaleSelection(validItems: allItems)
+        }
+        .task(id: projectionKey) {
+            await projection.updateBrowserProjection(
+                allItems: allItems,
+                watchedFolderPaths: watchedFolders.map(\.path),
+                filter: sidebarFilter,
+                searchText: searchText,
+                sortOrder: sortOrder,
+                groupRelatedModels: groupRelatedModels
+            )
+            if let gid = openedGroupID, projection.groupByID[gid] == nil {
                 openedGroupID = nil
             }
         }
@@ -393,7 +513,7 @@ struct ContentView: View {
             AICategorizeSheetView(
                 vlmService: vlmService,
                 allItems: allItems,
-                selectedItems: resolveSelectedItems(in: displayedItems),
+                selectedItems: resolveSelectedItems(in: visibleScopeItems),
                 categories: categories,
                 watchedFolderPaths: watchedFolders.map(\.path),
                 onRunKeywordFallback: {
@@ -429,14 +549,16 @@ struct ContentView: View {
             promptImportFilesOrFolders()
         }
         .onReceive(NotificationCenter.default.publisher(for: .printVaultSendSelectedToSlicer)) { _ in
-            let items = resolveSelectedItems(in: computeFilteredItems())
+            let currentScope = openedGroupID.flatMap { projection.groupByID[$0]?.items } ?? projection.displayedItems
+            let items = resolveSelectedItems(in: currentScope)
             guard !items.isEmpty else { return }
             Task {
                 _ = await slicerService.sendToSlicer(items: items)
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .printVaultExpandPreview)) { _ in
-            if let active = resolveSelectedItem(in: computeFilteredItems()) {
+            let currentScope = openedGroupID.flatMap { projection.groupByID[$0]?.items } ?? projection.displayedItems
+            if let active = resolveSelectedItem(in: currentScope) {
                 expandedPreviewItem = active
             }
         }
@@ -447,9 +569,8 @@ struct ContentView: View {
 
     // MARK: - Isolated Sidebar View (Avoids Detail-Pane Re-diffs & SwiftData Relationship Faults)
 
-    private struct LibrarySidebarView: View, Equatable {
+    private struct LibrarySidebarView: View {
         @Binding var selection: SidebarFilter?
-        let selectedValue: SidebarFilter?
         let stats: SidebarStats
         let categories: [CategoryRowSnapshot]
         let watchedFolders: [WatchedFolderRowSnapshot]
@@ -463,13 +584,6 @@ struct ContentView: View {
         let onRemoveWatchedFolder: (String) -> Void
 
         @State private var highlightedDropCategoryId: UUID?
-
-        nonisolated static func == (lhs: LibrarySidebarView, rhs: LibrarySidebarView) -> Bool {
-            lhs.selectedValue == rhs.selectedValue
-                && lhs.stats == rhs.stats
-                && lhs.categories == rhs.categories
-                && lhs.watchedFolders == rhs.watchedFolders
-        }
 
         var body: some View {
             List(selection: $selection) {
@@ -1293,11 +1407,15 @@ struct ContentView: View {
         Divider()
 
         Menu("Assign Category") {
-            Button("Uncategorized") { item.category = nil }
+            Button("Uncategorized") {
+                item.category = nil
+                try? modelContext.save()
+            }
             Divider()
             ForEach(categories) { category in
                 Button {
                     item.category = category
+                    try? modelContext.save()
                 } label: {
                     Label(category.name, systemImage: category.iconName)
                 }
@@ -1308,6 +1426,7 @@ struct ContentView: View {
             ForEach(PrintStatus.allCases) { status in
                 Button {
                     item.printStatus = status
+                    try? modelContext.save()
                 } label: {
                     Label(status.label, systemImage: status.systemImage)
                 }
@@ -1316,6 +1435,7 @@ struct ContentView: View {
 
         Button {
             item.isFavorite.toggle()
+            try? modelContext.save()
         } label: {
             Label(item.isFavorite ? "Remove from Favorites" : "Add to Favorites", systemImage: "heart")
         }
@@ -1382,7 +1502,7 @@ struct ContentView: View {
                     Task {
                         let urls = SampleMeshGenerator.createSampleModelsOnDisk()
                         _ = await scanner.importURLs(urls, into: modelContext)
-                        if let first = computeFilteredItems().first {
+                        if let first = projection.displayedItems.first ?? allItems.first {
                             selectedItemPaths = [first.filePath]
                             primarySelectedPath = first.filePath
                         }
@@ -1463,17 +1583,17 @@ struct ContentView: View {
                 }
 
                 Button {
-                    preferEmbedded3MFThumbnails.toggle()
-                    ThumbnailService.shared.preferEmbedded3MFThumbnails = preferEmbedded3MFThumbnails
-                    ThumbnailService.shared.clearCache()
+                    let nextValue = !thumbnailService.preferEmbedded3MFThumbnails
+                    thumbnailService.preferEmbedded3MFThumbnails = nextValue
+                    thumbnailService.clearCache()
                     thumbnailGeneration += 1
-                    scanner.statusMessage = preferEmbedded3MFThumbnails
+                    scanner.statusMessage = nextValue
                         ? "Showing embedded .3MF preview images."
                         : "Rendering uniform 3D studio thumbnails for all models."
                 } label: {
                     Label(
-                        preferEmbedded3MFThumbnails ? "Use Uniform 3D Thumbnails for .3MF" : "Use Embedded .3MF Previews",
-                        systemImage: preferEmbedded3MFThumbnails ? "cube.fill" : "photo"
+                        thumbnailService.preferEmbedded3MFThumbnails ? "Use Uniform 3D Thumbnails for .3MF" : "Use Embedded .3MF Previews",
+                        systemImage: thumbnailService.preferEmbedded3MFThumbnails ? "cube.fill" : "photo"
                     )
                 }
 

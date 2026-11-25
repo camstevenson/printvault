@@ -527,6 +527,13 @@ public final class SlicerService {
                     item.printStatus = hookConfig.targetStatusOnSend
                 }
             }
+            if let context = validItems.first?.modelContext {
+                do {
+                    try context.save()
+                } catch {
+                    Self.logger.error("Failed to persist slicer tracking metadata: \(error.localizedDescription, privacy: .public)")
+                }
+            }
         }
 
         // 6. URL Scheme / Shortcuts / Webhook Hook

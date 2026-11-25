@@ -4,6 +4,7 @@ import SceneKit
 import QuickLookThumbnailing
 import CryptoKit
 import ImageIO
+import Observation
 
 // MARK: - Off-Main-Thread Serial Metal Snapshot Renderer
 
@@ -103,24 +104,21 @@ private actor ThumbnailDiskCache {
         self.directory = directory
     }
 
-    func currentGeneration() -> Int {
-        generation
-    }
-
-    func clear() {
-        generation += 1
+    func clear(toGeneration newGeneration: Int) {
+        guard newGeneration > generation else { return }
+        generation = newGeneration
         guard let dir = directory else { return }
         try? FileManager.default.removeItem(at: dir)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     }
 
     func writePNGData(_ data: Data, to url: URL, expectedGeneration: Int) {
-        guard expectedGeneration == generation else { return }
+        guard expectedGeneration >= generation else { return }
         try? data.write(to: url, options: .atomic)
     }
 
     func writeDownsampledPNG(cgImage: CGImage, fallbackData: Data, to url: URL, expectedGeneration: Int) {
-        guard expectedGeneration == generation else { return }
+        guard expectedGeneration >= generation else { return }
         let rep = NSBitmapImageRep(cgImage: cgImage)
         if let png = rep.representation(using: .png, properties: [:]) {
             try? png.write(to: url, options: .atomic)
@@ -133,6 +131,7 @@ private actor ThumbnailDiskCache {
 // MARK: - ThumbnailService
 
 @MainActor
+@Observable
 public final class ThumbnailService {
     public static let shared = ThumbnailService()
 
@@ -141,12 +140,13 @@ public final class ThumbnailService {
         var waiters: Set<UUID>
     }
 
-    private let preferEmbeddedKey = "PrintVault.PreferEmbedded3MFThumbnails.v1"
-    private let memoryCache = NSCache<NSString, NSImage>()
-    private var latestKeyByPathAndSize: [String: String] = [:]
-    private var inFlight: [String: InFlightThumbnail] = [:]
-    private let diskCacheDirectory: URL?
-    private let diskCache: ThumbnailDiskCache
+    @ObservationIgnored private let preferEmbeddedKey = "PrintVault.PreferEmbedded3MFThumbnails.v1"
+    @ObservationIgnored private let memoryCache = NSCache<NSString, NSImage>()
+    @ObservationIgnored private var latestKeyByPathAndSize: [String: String] = [:]
+    @ObservationIgnored private var inFlight: [String: InFlightThumbnail] = [:]
+    @ObservationIgnored private var cacheGeneration: Int = 0
+    @ObservationIgnored private let diskCacheDirectory: URL?
+    @ObservationIgnored private let diskCache: ThumbnailDiskCache
 
     public var preferEmbedded3MFThumbnails: Bool {
         didSet {
@@ -200,6 +200,8 @@ public final class ThumbnailService {
     }
 
     public func clearCache() {
+        cacheGeneration += 1
+        let nextGeneration = cacheGeneration
         memoryCache.removeAllObjects()
         latestKeyByPathAndSize.removeAll()
         for (_, entry) in inFlight {
@@ -208,7 +210,7 @@ public final class ThumbnailService {
         inFlight.removeAll()
         let disk = self.diskCache
         Task {
-            await disk.clear()
+            await disk.clear(toGeneration: nextGeneration)
         }
     }
 
@@ -248,8 +250,7 @@ public final class ThumbnailService {
         let cacheDir = self.diskCacheDirectory
         let useEmbedded3MF = self.preferEmbedded3MFThumbnails
         let disk = self.diskCache
-        let generation = await disk.currentGeneration()
-        guard !Task.isCancelled else { return nil }
+        let generation = self.cacheGeneration
 
         // Stat modTime off the main actor so modified files never hit stale memory cache entries
         let (modTime, diskURL) = await Self.resolveCacheMetadata(
@@ -305,8 +306,7 @@ public final class ThumbnailService {
 
         guard !Task.isCancelled, let cgImage else { return nil }
         let image = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
-        let currentGen = await disk.currentGeneration()
-        if currentGen == generation {
+        if self.cacheGeneration == generation {
             storeInMemory(image, fullKey: fullKey, path: url.path, maxPixel: maxPixel)
         }
         return image

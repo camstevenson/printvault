@@ -128,6 +128,81 @@ public enum ModelGroupingService {
         "fdm", "unsupported", "supported", "presupported", "free", "pack", "all"
     ]
 
+    /// Lightweight `Sendable` snapshot of a `PrintFileItem` so grouping heuristics and disk companion checks
+    /// can execute completely off the main actor without touching SwiftData `@Model` instances off-thread.
+    private struct GroupingItemSnapshot: Sendable {
+        let index: Int
+        let filePath: String
+        let fileName: String
+        let displayTitle: String
+        let fileSize: Int64
+        let categoryID: UUID?
+
+        var fileURL: URL {
+            URL(fileURLWithPath: filePath)
+        }
+    }
+
+    private struct ResolvedGroupPlan: Sendable {
+        let id: String
+        let title: String
+        let memberIndices: [Int]
+        let primaryIndex: Int
+        let reason: ModelGroupReason
+        let sortRank: Int
+    }
+
+    private enum ResolvedEntryPlan: Sendable {
+        case single(index: Int, sortRank: Int)
+        case group(ResolvedGroupPlan)
+
+        var sortRank: Int {
+            switch self {
+            case .single(_, let rank): return rank
+            case .group(let plan): return plan.sortRank
+            }
+        }
+    }
+
+    private nonisolated static func makeExcludedRoots(watchedFolderPaths: [String]) -> Set<String> {
+        let normalizedWatchedRoots = Set(watchedFolderPaths.map { normalizeDirPath($0) })
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return normalizedWatchedRoots.union([
+            normalizeDirPath(home),
+            normalizeDirPath("\(home)/Downloads"),
+            normalizeDirPath("\(home)/Documents"),
+            normalizeDirPath("\(home)/Desktop")
+        ])
+    }
+
+    /// Groups related 3D print files asynchronously off the main actor (keeping regexes and companion-file
+    /// disk checks off the UI thread) while preserving the incoming sort order of `items`.
+    @MainActor
+    public static func groupItemsAsync(
+        _ items: [PrintFileItem],
+        watchedFolderPaths: [String]
+    ) async -> [BrowserEntry] {
+        guard items.count > 1 else {
+            return items.map { .single($0) }
+        }
+        let snapshots = items.enumerated().map { idx, item in
+            GroupingItemSnapshot(
+                index: idx,
+                filePath: item.filePath,
+                fileName: item.fileName,
+                displayTitle: item.displayTitle,
+                fileSize: item.fileSize,
+                categoryID: item.category?.id
+            )
+        }
+        let plans = await computeGroupPlansOffMain(
+            snapshots: snapshots,
+            watchedFolderPaths: watchedFolderPaths
+        )
+        guard !Task.isCancelled else { return [] }
+        return materializeEntries(from: plans, items: items)
+    }
+
     /// Groups related 3D print files into multi-part `ModelGroup`s while keeping dissimilar files standalone.
     /// Preserves the incoming sort order of `items`.
     @MainActor
@@ -138,32 +213,78 @@ public enum ModelGroupingService {
         guard items.count > 1 else {
             return items.map { .single($0) }
         }
+        let snapshots = items.enumerated().map { idx, item in
+            GroupingItemSnapshot(
+                index: idx,
+                filePath: item.filePath,
+                fileName: item.fileName,
+                displayTitle: item.displayTitle,
+                fileSize: item.fileSize,
+                categoryID: item.category?.id
+            )
+        }
+        let plans = computeGroupPlans(
+            snapshots: snapshots,
+            watchedFolderPaths: watchedFolderPaths
+        )
+        return materializeEntries(from: plans, items: items)
+    }
 
-        let normalizedWatchedRoots = Set(watchedFolderPaths.map { normalizeDirPath($0) })
-        let homeSubRoots: Set<String> = {
-            let home = FileManager.default.homeDirectoryForCurrentUser.path
-            return Set([
-                normalizeDirPath(home),
-                normalizeDirPath("\(home)/Downloads"),
-                normalizeDirPath("\(home)/Documents"),
-                normalizeDirPath("\(home)/Desktop")
-            ])
-        }()
-        let excludedRoots = normalizedWatchedRoots.union(homeSubRoots)
+    @MainActor
+    private static func materializeEntries(
+        from plans: [ResolvedEntryPlan],
+        items: [PrintFileItem]
+    ) -> [BrowserEntry] {
+        plans.compactMap { plan in
+            switch plan {
+            case .single(let idx, _):
+                guard idx < items.count else { return nil }
+                return .single(items[idx])
+            case .group(let groupPlan):
+                let members = groupPlan.memberIndices.compactMap { $0 < items.count ? items[$0] : nil }
+                guard !members.isEmpty else { return nil }
+                let primary = groupPlan.primaryIndex < items.count ? items[groupPlan.primaryIndex] : members[0]
+                return .group(
+                    ModelGroup(
+                        id: groupPlan.id,
+                        title: groupPlan.title,
+                        items: members,
+                        primaryItem: primary,
+                        reason: groupPlan.reason
+                    )
+                )
+            }
+        }
+    }
 
-        // Preserve original sort index so groups stay ordered naturally according to current BrowserSortOrder
-        let orderIndex = Dictionary(uniqueKeysWithValues: items.enumerated().map { ($1.filePath, $0) })
+    private nonisolated static func computeGroupPlansOffMain(
+        snapshots: [GroupingItemSnapshot],
+        watchedFolderPaths: [String]
+    ) async -> [ResolvedEntryPlan] {
+        computeGroupPlans(snapshots: snapshots, watchedFolderPaths: watchedFolderPaths)
+    }
+
+    private nonisolated static func computeGroupPlans(
+        snapshots: [GroupingItemSnapshot],
+        watchedFolderPaths: [String]
+    ) -> [ResolvedEntryPlan] {
+        guard snapshots.count > 1 else {
+            return snapshots.map { .single(index: $0.index, sortRank: $0.index) }
+        }
+
+        let excludedRoots = makeExcludedRoots(watchedFolderPaths: watchedFolderPaths)
 
         // Step 1: Bucket items by their resolved "project folder" (unwrapping Thingiverse/Printables `files/` or `STLs/` wrappers)
         struct FolderBucket {
             let folderPath: String
             let folderName: String
-            var items: [PrintFileItem] = []
+            var items: [GroupingItemSnapshot] = []
             var hadWrapperSubfolder: Bool = false
         }
 
         var buckets: [String: FolderBucket] = [:]
-        for item in items {
+        for item in snapshots {
+            if Task.isCancelled { return [] }
             let (projectFolderURL, unwrapped) = resolveProjectFolder(
                 for: item.fileURL,
                 excludedRoots: excludedRoots
@@ -178,11 +299,13 @@ public enum ModelGroupingService {
             buckets[key] = bucket
         }
 
-        var formedGroups: [ModelGroup] = []
-        var groupedPaths = Set<String>()
+        var formedGroups: [ResolvedGroupPlan] = []
+        var groupedIndices = Set<Int>()
+        var companionFileCache: [String: Bool] = [:]
 
         // Step 2: Evaluate each folder bucket conservatively
         for (_, bucket) in buckets {
+            if Task.isCancelled { return [] }
             guard bucket.items.count >= 2 else { continue }
 
             let isGenericOrRoot = excludedRoots.contains(bucket.folderPath)
@@ -193,44 +316,46 @@ public enum ModelGroupingService {
                    bucket.items,
                    folderPath: bucket.folderPath,
                    folderName: bucket.folderName,
-                   hadWrapperSubfolder: bucket.hadWrapperSubfolder
+                   hadWrapperSubfolder: bucket.hadWrapperSubfolder,
+                   companionFileCache: &companionFileCache
                ),
                cohesiveMembers.count >= 2 {
                 let sortedMembers = sortPartsInsideGroup(cohesiveMembers)
-                let group = ModelGroup(
+                let primary = pickPrimaryItem(from: sortedMembers)
+                let bestRank = sortedMembers.map(\.index).min() ?? Int.max
+                let group = ResolvedGroupPlan(
                     id: "folder:\(bucket.folderPath)",
                     title: cleanDisplayTitle(bucket.folderName),
-                    items: sortedMembers,
-                    primaryItem: pickPrimaryItem(from: sortedMembers),
-                    reason: .projectFolder
+                    memberIndices: sortedMembers.map(\.index),
+                    primaryIndex: primary.index,
+                    reason: .projectFolder,
+                    sortRank: bestRank
                 )
                 formedGroups.append(group)
-                for member in sortedMembers { groupedPaths.insert(member.filePath) }
+                for member in sortedMembers { groupedIndices.insert(member.index) }
             } else {
                 // Generic root or mixed subfolder: only group items that share an unmistakable multi-part filename stem
                 let stemGroups = groupBySharedMultiPartStem(bucket.items, containerPath: bucket.folderPath)
                 for g in stemGroups {
                     formedGroups.append(g)
-                    for member in g.items { groupedPaths.insert(member.filePath) }
+                    for idx in g.memberIndices { groupedIndices.insert(idx) }
                 }
             }
         }
 
         // Step 3: Merge groups and remaining standalone items back in the caller's sort order
-        var orderedEntries: [(rank: Int, entry: BrowserEntry)] = []
-        orderedEntries.reserveCapacity(formedGroups.count + (items.count - groupedPaths.count))
+        var orderedEntries: [ResolvedEntryPlan] = []
+        orderedEntries.reserveCapacity(formedGroups.count + (snapshots.count - groupedIndices.count))
 
         for group in formedGroups {
-            let bestRank = group.items.compactMap { orderIndex[$0.filePath] }.min() ?? Int.max
-            orderedEntries.append((bestRank, .group(group)))
+            orderedEntries.append(.group(group))
         }
-        for item in items where !groupedPaths.contains(item.filePath) {
-            let rank = orderIndex[item.filePath] ?? Int.max
-            orderedEntries.append((rank, .single(item)))
+        for item in snapshots where !groupedIndices.contains(item.index) {
+            orderedEntries.append(.single(index: item.index, sortRank: item.index))
         }
 
-        orderedEntries.sort { $0.rank < $1.rank }
-        return orderedEntries.map(\.entry)
+        orderedEntries.sort { $0.sortRank < $1.sortRank }
+        return orderedEntries
     }
 
     /// Print-variant subfolder names that should be unwrapped when extracting semantic project context for AI classification.
@@ -252,14 +377,7 @@ public enum ModelGroupingService {
         for fileURL: URL,
         watchedFolderPaths: [String] = []
     ) -> (projectFolder: String?, ancestorFolder: String?) {
-        let normalizedWatchedRoots = Set(watchedFolderPaths.map { normalizeDirPath($0) })
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let excludedRoots = normalizedWatchedRoots.union([
-            normalizeDirPath(home),
-            normalizeDirPath("\(home)/Downloads"),
-            normalizeDirPath("\(home)/Documents"),
-            normalizeDirPath("\(home)/Desktop")
-        ])
+        let excludedRoots = makeExcludedRoots(watchedFolderPaths: watchedFolderPaths)
 
         var dir = fileURL.deletingLastPathComponent()
 
@@ -355,14 +473,14 @@ public enum ModelGroupingService {
 
     // MARK: - Subfolder Cohesion Check (Anti-False-Positive Guard)
 
-    @MainActor
-    private static func cohesiveProjectMembers(
-        _ items: [PrintFileItem],
+    private nonisolated static func cohesiveProjectMembers(
+        _ items: [GroupingItemSnapshot],
         folderPath: String,
         folderName: String,
-        hadWrapperSubfolder: Bool
-    ) -> [PrintFileItem]? {
-        let distinctCategoryIDs = Set(items.compactMap { $0.category?.id })
+        hadWrapperSubfolder: Bool,
+        companionFileCache: inout [String: Bool]
+    ) -> [GroupingItemSnapshot]? {
+        let distinctCategoryIDs = Set(items.compactMap { $0.categoryID })
         let hasConflictingCategories = distinctCategoryIDs.count > 1
 
         let folderTokens = meaningfulTokens(from: folderName)
@@ -408,14 +526,14 @@ public enum ModelGroupingService {
                     coreIndices.insert(idx)
                 }
             }
-            let coreCategoryIDs = Set(coreIndices.compactMap { items[$0].category?.id })
+            let coreCategoryIDs = Set(coreIndices.compactMap { items[$0].categoryID })
 
             // Exclude obvious stray unrelated files dropped into a non-archive project folder
             // (zero token overlap + no assembly vocabulary + different category from the matching model files).
-            let kept = items.enumerated().compactMap { idx, item -> PrintFileItem? in
+            let kept = items.enumerated().compactMap { idx, item -> GroupingItemSnapshot? in
                 if coreIndices.contains(idx) { return item }
                 if hasAssemblyVocabulary(item.displayTitle) { return item }
-                if let catID = item.category?.id, !coreCategoryIDs.isEmpty, !coreCategoryIDs.contains(catID) {
+                if let catID = item.categoryID, !coreCategoryIDs.isEmpty, !coreCategoryIDs.contains(catID) {
                     return nil
                 }
                 return item
@@ -437,8 +555,18 @@ public enum ModelGroupingService {
             }
         }
 
-        if items.count <= 12 && hasArchiveCompanionFiles(at: folderPath) {
-            return items
+        if items.count <= 12 {
+            let hasCompanions: Bool
+            if let cached = companionFileCache[folderPath] {
+                hasCompanions = cached
+            } else {
+                let checked = hasArchiveCompanionFiles(at: folderPath)
+                companionFileCache[folderPath] = checked
+                hasCompanions = checked
+            }
+            if hasCompanions {
+                return items
+            }
         }
 
         return nil
@@ -446,19 +574,18 @@ public enum ModelGroupingService {
 
     // MARK: - Strict Shared Multi-Part Stem Grouping (for Generic / Mixed Folders)
 
-    @MainActor
-    private static func groupBySharedMultiPartStem(
-        _ items: [PrintFileItem],
+    private nonisolated static func groupBySharedMultiPartStem(
+        _ items: [GroupingItemSnapshot],
         containerPath: String
-    ) -> [ModelGroup] {
+    ) -> [ResolvedGroupPlan] {
         // Group strictly by (immediateParentDir, extractedMultiPartStem)
         struct StemKey: Hashable {
             let dir: String
             let stem: String
         }
 
-        var stemBuckets: [StemKey: [(item: PrintFileItem, displayStem: String, hadExplicitSuffix: Bool)]] = [:]
-        var unmatchedItems: [(dir: String, normalizedTitle: String, item: PrintFileItem)] = []
+        var stemBuckets: [StemKey: [(item: GroupingItemSnapshot, displayStem: String, hadExplicitSuffix: Bool)]] = [:]
+        var unmatchedItems: [(dir: String, normalizedTitle: String, item: GroupingItemSnapshot)] = []
 
         for item in items {
             let dir = normalizeDirPath(item.fileURL.deletingLastPathComponent().path)
@@ -474,7 +601,7 @@ public enum ModelGroupingService {
         // `AK_lichking.3mf` alongside `AK_lichking-center.3mf`, or `tower.stl` alongside `tower_top.stl`)
         // to join its matching explicit-suffix stem bucket in the same directory.
         // Also group identical base names in different formats (e.g. `Model.stl` + `Model.3mf`).
-        var exactNameBuckets: [StemKey: [PrintFileItem]] = [:]
+        var exactNameBuckets: [StemKey: [GroupingItemSnapshot]] = [:]
         for candidate in unmatchedItems where candidate.normalizedTitle.count >= 4 {
             let key = StemKey(dir: candidate.dir, stem: candidate.normalizedTitle)
             if stemBuckets[key] != nil {
@@ -490,18 +617,21 @@ public enum ModelGroupingService {
             stemBuckets[key] = sameNameItems.map { ($0, display, true) }
         }
 
-        var groups: [ModelGroup] = []
+        var groups: [ResolvedGroupPlan] = []
         for (key, entries) in stemBuckets where entries.count >= 2 && entries.contains(where: \.hadExplicitSuffix) {
             let bucketItems = entries.map(\.item)
             let sortedMembers = sortPartsInsideGroup(bucketItems)
+            let primary = pickPrimaryItem(from: sortedMembers)
+            let bestRank = sortedMembers.map(\.index).min() ?? Int.max
             let title = cleanDisplayTitle(entries.first(where: \.hadExplicitSuffix)?.displayStem ?? key.stem)
             groups.append(
-                ModelGroup(
+                ResolvedGroupPlan(
                     id: "stem:\(containerPath)|\(key.dir)|\(key.stem)",
                     title: title,
-                    items: sortedMembers,
-                    primaryItem: pickPrimaryItem(from: sortedMembers),
-                    reason: .sharedStem
+                    memberIndices: sortedMembers.map(\.index),
+                    primaryIndex: primary.index,
+                    reason: .sharedStem,
+                    sortRank: bestRank
                 )
             )
         }
@@ -642,8 +772,7 @@ public enum ModelGroupingService {
         return markers.contains { fm.fileExists(atPath: (folderPath as NSString).appendingPathComponent($0)) }
     }
 
-    @MainActor
-    private static func sortPartsInsideGroup(_ items: [PrintFileItem]) -> [PrintFileItem] {
+    private nonisolated static func sortPartsInsideGroup(_ items: [GroupingItemSnapshot]) -> [GroupingItemSnapshot] {
         items.sorted { a, b in
             let aScore = heroPriorityScore(a.displayTitle)
             let bScore = heroPriorityScore(b.displayTitle)
@@ -652,8 +781,7 @@ public enum ModelGroupingService {
         }
     }
 
-    @MainActor
-    private static func pickPrimaryItem(from items: [PrintFileItem]) -> PrintFileItem {
+    private nonisolated static func pickPrimaryItem(from items: [GroupingItemSnapshot]) -> GroupingItemSnapshot {
         items.max { a, b in
             let sa = heroPriorityScore(a.displayTitle)
             let sb = heroPriorityScore(b.displayTitle)

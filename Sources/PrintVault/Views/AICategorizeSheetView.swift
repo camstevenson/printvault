@@ -184,6 +184,9 @@ struct AICategorizeSheetView: View {
             }
             await vlmService.detectLocalRuntimes()
         }
+        .onChange(of: vlmService.config) { _, _ in
+            vlmService.saveConfiguration()
+        }
         .onDisappear {
             vlmService.saveConfiguration()
         }
@@ -239,18 +242,18 @@ struct AICategorizeSheetView: View {
                     .controlSize(.small)
                     .onChange(of: vlmService.config.backend) { _, newKind in
                         vlmService.config.baseURL = newKind.defaultBaseURL
-                        Task { await vlmService.detectLocalRuntimes(preferCurrentBackend: true) }
+                        vlmService.triggerDetectLocalRuntimes(preferCurrentBackend: true)
                     }
 
                     TextField("Endpoint URL", text: $vlmService.config.baseURL)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(.caption, design: .monospaced))
                         .onSubmit {
-                            Task { await vlmService.detectLocalRuntimes(preferCurrentBackend: true) }
+                            vlmService.triggerDetectLocalRuntimes(preferCurrentBackend: true)
                         }
 
                     Button {
-                        Task { await vlmService.detectLocalRuntimes(preferCurrentBackend: true) }
+                        vlmService.triggerDetectLocalRuntimes(preferCurrentBackend: true)
                     } label: {
                         Image(systemName: "arrow.clockwise")
                     }
@@ -285,9 +288,6 @@ struct AICategorizeSheetView: View {
                         .labelsHidden()
                         .frame(maxWidth: 320)
                         .controlSize(.small)
-                        .onChange(of: vlmService.config.selectedModel) { _, _ in
-                            vlmService.saveConfiguration()
-                        }
 
                         if vlmService.config.backend == .ollama
                             && !vlmService.availableModels.contains(where: { $0.lowercased().contains("qwen2.5vl") }) {

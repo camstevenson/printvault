@@ -212,11 +212,13 @@ struct ModelGridCardView: View {
         Menu("Assign Category") {
             Button("Uncategorized") {
                 item.category = nil
+                try? modelContext.save()
             }
             Divider()
             ForEach(categories) { category in
                 Button {
                     item.category = category
+                    try? modelContext.save()
                 } label: {
                     Label(category.name, systemImage: category.iconName)
                 }
@@ -227,6 +229,7 @@ struct ModelGridCardView: View {
             ForEach(PrintStatus.allCases) { status in
                 Button {
                     item.printStatus = status
+                    try? modelContext.save()
                 } label: {
                     Label(status.label, systemImage: status.systemImage)
                 }
@@ -235,6 +238,7 @@ struct ModelGridCardView: View {
 
         Button {
             item.isFavorite.toggle()
+            try? modelContext.save()
         } label: {
             Label(item.isFavorite ? "Remove from Favorites" : "Add to Favorites", systemImage: "heart")
         }
