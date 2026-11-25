@@ -16,6 +16,7 @@
 		530CEED60180610790367C97 /* ModelGroupingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFC8B6C96EEC7B7DB1C34AED /* ModelGroupingService.swift */; };
 		8995F76F8C91583E4191C6EA /* ModelGroupCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92C5CDE5E1C618B46B1ECB2E /* ModelGroupCardView.swift */; };
 		910A21828FCD54A1497B35DE /* Preview3DView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CEE8693706AA8E68D264FFCA /* Preview3DView.swift */; };
+		96F8F74348FBA759CB351F9A /* AboutView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 924AA59E903A6C1DDC037D6C /* AboutView.swift */; };
 		9907431AC7251304C3E50065 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 789B4CEB180F577A9BB05AA5 /* Assets.xcassets */; };
 		A33BE3FDD1FEC693F0839A77 /* MeshLoaderService.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4694B5CA2099C7CF8FFBB70 /* MeshLoaderService.swift */; };
 		BA63FE113DA918426373D622 /* VLMCategorizerService.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD74E4B29BCC5C29D7ECDFC0 /* VLMCategorizerService.swift */; };
@@ -48,6 +49,7 @@
 		62291B42C319108A384C8815 /* InspectorPaneView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InspectorPaneView.swift; sourceTree = "<group>"; };
 		70C2269F1D7B2E396600BFA5 /* PrintVault.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PrintVault.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		789B4CEB180F577A9BB05AA5 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		924AA59E903A6C1DDC037D6C /* AboutView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AboutView.swift; sourceTree = "<group>"; };
 		92C5CDE5E1C618B46B1ECB2E /* ModelGroupCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelGroupCardView.swift; sourceTree = "<group>"; };
 		A303E50FD5D89D8C6CDF1D05 /* PrintVault.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = PrintVault.entitlements; sourceTree = "<group>"; };
 		AD74E4B29BCC5C29D7ECDFC0 /* VLMCategorizerService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VLMCategorizerService.swift; sourceTree = "<group>"; };
@@ -127,6 +129,7 @@
 		A0975ACA2DDF74471569059C /* Views */ = {
 			isa = PBXGroup;
 			children = (
+				924AA59E903A6C1DDC037D6C /* AboutView.swift */,
 				2D73C981760C3958376CB092 /* AICategorizeSheetView.swift */,
 				4AA6BBD9A24062379E7F052A /* ContentView.swift */,
 				62291B42C319108A384C8815 /* InspectorPaneView.swift */,
@@ -256,6 +259,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				FF1C614218EED79C571BE4A5 /* AICategorizeSheetView.swift in Sources */,
+				96F8F74348FBA759CB351F9A /* AboutView.swift in Sources */,
 				E687A2510EF7C8B846D55F05 /* ContentView.swift in Sources */,
 				14B525AF6F16D03D001C0C24 /* FileScannerService.swift in Sources */,
 				C9BC0050CACE8AAD2C9E4386 /* FinderTagService.swift in Sources */,

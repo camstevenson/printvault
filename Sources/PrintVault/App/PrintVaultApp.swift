@@ -13,6 +13,7 @@ final class PrintVaultAppDelegate: NSObject, NSApplicationDelegate {
 struct PrintVaultApp: App {
     private static let logger = Logger(subsystem: "com.printvault.PrintVault", category: "App")
 
+    @Environment(\.openWindow) private var openWindow
     @NSApplicationDelegateAdaptor(PrintVaultAppDelegate.self) private var appDelegate
     let sharedModelContainer: ModelContainer
     let persistenceWarning: String?
@@ -64,6 +65,12 @@ struct PrintVaultApp: App {
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified)
         .commands {
+            CommandGroup(replacing: .appInfo) {
+                Button("About PrintVault") {
+                    openWindow(id: "about")
+                }
+            }
+
             CommandGroup(replacing: .saveItem) {}
 
             CommandGroup(after: .newItem) {
@@ -90,6 +97,14 @@ struct PrintVaultApp: App {
                 .keyboardShortcut("p", modifiers: [.command, .shift])
             }
         }
+
+        Window("About PrintVault", id: "about") {
+            AboutView()
+        }
+        .modelContainer(sharedModelContainer)
+        .windowStyle(.titleBar)
+        .windowResizability(.contentSize)
+        .restorationBehavior(.disabled)
 
         Settings {
             SlicerSettingsView(
