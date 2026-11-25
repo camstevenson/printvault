@@ -40,7 +40,6 @@ public enum PrintFileFormat: String, Codable, CaseIterable, Identifiable, Sendab
 public enum PrintStatus: String, Codable, CaseIterable, Identifiable, Sendable {
     case unprinted = "unprinted"
     case queued = "queued"
-    case printing = "printing"
     case printed = "printed"
     case failed = "failed"
 
@@ -50,7 +49,6 @@ public enum PrintStatus: String, Codable, CaseIterable, Identifiable, Sendable {
         switch self {
         case .unprinted: return "Unprinted"
         case .queued: return "In Queue"
-        case .printing: return "Printing"
         case .printed: return "Printed"
         case .failed: return "Needs Fix"
         }
@@ -60,7 +58,6 @@ public enum PrintStatus: String, Codable, CaseIterable, Identifiable, Sendable {
         switch self {
         case .unprinted: return "cube.transparent"
         case .queued: return "tray.full.fill"
-        case .printing: return "flame.fill"
         case .printed: return "checkmark.seal.fill"
         case .failed: return "exclamationmark.triangle.fill"
         }
@@ -70,7 +67,6 @@ public enum PrintStatus: String, Codable, CaseIterable, Identifiable, Sendable {
         switch self {
         case .unprinted: return .secondary
         case .queued: return .blue
-        case .printing: return .orange
         case .printed: return .green
         case .failed: return .red
         }
@@ -212,7 +208,15 @@ public final class PrintFileItem {
     }
 
     public var printStatus: PrintStatus {
-        get { PrintStatus(rawValue: printStatusRaw) ?? .unprinted }
+        get {
+            if let status = PrintStatus(rawValue: printStatusRaw) {
+                return status
+            }
+            if printStatusRaw == "printing" {
+                return .queued
+            }
+            return .unprinted
+        }
         set { printStatusRaw = newValue.rawValue }
     }
 

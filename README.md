@@ -19,7 +19,7 @@ Built with **Swift 6**, **SwiftUI**, **SwiftData**, **SceneKit**, and **Metal**,
 - **AI Visual Auto-Categorization (Local VLM)** — Renders a neutral matte-gray 3D studio view of each model paired with its physical dimensions (`mm`) and geometry metrics, then classifies models locally via **Ollama**, **LM Studio**, or any OpenAI-compatible **MLX-VLM** server (with auto-detection, 1-click Ollama launch & `qwen2.5vl:3b` download, confidence-scored review UI, optional new-category creation, auto-generated tags, and 1-line model summaries)—plus instant keyword-heuristic fallback.
 - **Multi-Select Batch Actions** — `⌘`-click in Grid view (or multi-select in Table view) to categorize, update print status, or send multiple models to a slicer at once.
 - **Native macOS Finder Tag Sync** — Read existing Finder tags on import and push categories/tags back to macOS Finder metadata.
-- **Print Tracking** — Track print status (*Unprinted*, *In Queue*, *Printing*, *Printed*, *Needs Fix*), star ratings, favorites, slice history, and per-model print notes persisted in SwiftData.
+- **Print Tracking** — Track print status (*Unprinted*, *In Queue*, *Printed*, *Needs Fix*), star ratings, favorites, slice history, and per-model print notes persisted in SwiftData.
 
 ### Interactive 3D Preview & Print Estimates
 - **Native Binary/ASCII STL & 3MF Parsers** — Parses binary and ASCII `.stl` meshes as well as `.3mf` archives (including 3MF unit conversion to millimeters and `<build>` / `<component>` 3×4 affine transforms for multi-part plates).

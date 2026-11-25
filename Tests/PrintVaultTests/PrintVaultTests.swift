@@ -1080,4 +1080,29 @@ struct PrintVaultTests {
         #expect(ThumbnailService.shared.cachedThumbnail(for: cubeURL.path, size: smallSize) != nil)
         #expect(ThumbnailService.shared.cachedThumbnail(for: cubeURL.path, size: gridSize) == nil)
     }
+
+    @Test("PrintStatus excludes removed printing status and safely maps legacy stored values")
+    @MainActor
+    func printStatusExcludesPrintingAndMigratesLegacyValues() throws {
+        #expect(PrintStatus.allCases == [.unprinted, .queued, .printed, .failed])
+        #expect(PrintStatus(rawValue: "printing") == nil)
+
+        let item = makeTestItem(path: "/tmp/legacy-printing.stl")
+        item.printStatusRaw = "printing"
+        #expect(item.printStatus == .queued)
+
+        let legacyHookJSON = Data("""
+        {
+            "autoUpdateStatusOnSend": false,
+            "targetStatusOnSend": "printing",
+            "syncFinderTagsOnSend": false,
+            "preSliceShellCommand": "echo hi"
+        }
+        """.utf8)
+        let decoded = try JSONDecoder().decode(SlicerHookConfiguration.self, from: legacyHookJSON)
+        #expect(decoded.targetStatusOnSend == .queued)
+        #expect(decoded.autoUpdateStatusOnSend == false)
+        #expect(decoded.syncFinderTagsOnSend == false)
+        #expect(decoded.preSliceShellCommand == "echo hi")
+    }
 }

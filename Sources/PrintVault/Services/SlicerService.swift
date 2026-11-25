@@ -243,7 +243,12 @@ public struct SlicerHookConfiguration: Codable, Equatable, Sendable {
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         autoUpdateStatusOnSend = try c.decodeIfPresent(Bool.self, forKey: .autoUpdateStatusOnSend) ?? true
-        targetStatusOnSend = try c.decodeIfPresent(PrintStatus.self, forKey: .targetStatusOnSend) ?? .queued
+        if let rawStatus = try c.decodeIfPresent(String.self, forKey: .targetStatusOnSend),
+           let parsedStatus = PrintStatus(rawValue: rawStatus) {
+            targetStatusOnSend = parsedStatus
+        } else {
+            targetStatusOnSend = .queued
+        }
         syncFinderTagsOnSend = try c.decodeIfPresent(Bool.self, forKey: .syncFinderTagsOnSend) ?? true
         enablePreSliceShellHook = try c.decodeIfPresent(Bool.self, forKey: .enablePreSliceShellHook) ?? false
         preSliceShellCommand = try c.decodeIfPresent(String.self, forKey: .preSliceShellCommand) ?? ""
