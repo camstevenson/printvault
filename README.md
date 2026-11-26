@@ -19,6 +19,7 @@ Built with **Swift 6**, **SwiftUI**, **SwiftData**, **SceneKit**, and **Metal**,
 - **AI Visual Auto-Categorization (Local VLM)** — Renders a neutral matte-gray 3D studio view of each model paired with its physical dimensions (`mm`) and geometry metrics, then classifies models locally via **Ollama**, **LM Studio**, or any OpenAI-compatible **MLX-VLM** server (with auto-detection, 1-click Ollama launch & `qwen2.5vl:3b` download, confidence-scored review UI, optional new-category creation, auto-generated tags, and 1-line model summaries)—plus instant keyword-heuristic fallback.
 - **Multi-Select Batch Actions** — `⌘`-click in Grid view (or multi-select in Table view) to categorize, update print status, or send multiple models to a slicer at once.
 - **Native macOS Finder Tag Sync** — Read existing Finder tags on import and push categories/tags back to macOS Finder metadata.
+- **Download Provenance (`kMDItemWhereFroms`)** — Automatically reads macOS download source metadata during ingestion, persists source URL, designer, and license in SwiftData, and adds a 1-click **Open Source Page** button in the Inspector and context menus.
 - **Print Tracking** — Track print status (*Unprinted*, *In Queue*, *Printed*, *Needs Fix*), star ratings, favorites, slice history, and per-model print notes persisted in SwiftData.
 
 ### Interactive 3D Preview & Print Estimates
@@ -126,8 +127,10 @@ PrintVault/
 │   │   ├── Info.plist                            # Document type declarations (.stl, .3mf)
 │   │   └── PrintVault.entitlements
 │   ├── Models/
+│   │   ├── DownloadProvenance.swift              # Download provenance value type
 │   │   └── PrintModels.swift                     # SwiftData models & filament estimators
 │   ├── Services/
+│   │   ├── DownloadProvenanceService.swift       # macOS kMDItemWhereFroms provenance parser
 │   │   ├── FileScannerService.swift              # Watched folders, Spotlight, auto-categorizer
 │   │   ├── FinderTagService.swift                # macOS Finder tag read/write sync
 │   │   ├── MeshLoaderService.swift               # Native binary/ASCII STL & 3MF parsers
@@ -141,6 +144,8 @@ PrintVault/
 │       ├── ContentView.swift                     # Split-view sidebar, grid/table browser, batch bar
 │       ├── ModelGridCardView.swift               # Lightweight model card with drag & context menu
 │       ├── InspectorPaneView.swift               # Metrics, categorization, tags, slicer actions
+│       ├── InspectorProvenanceFieldsView.swift   # Editable source URL, designer & license fields
+│       ├── InspectorProvenanceSectionView.swift  # Download provenance header, actions & refresh
 │       ├── Preview3DView.swift                   # SceneKit orbit/pan/zoom viewport & expanded sheet
 │       └── SlicerSettingsView.swift              # Slicer profiles, shell/URL hooks & activity log
 └── Tests/PrintVaultTests/

@@ -260,7 +260,10 @@ struct ContentView: View {
                     let matchesCategory = item.category?.name.lowercased().contains(queryLower) ?? false
                     let matchesTag = item.tags.contains(where: { $0.lowercased().contains(queryLower) })
                     let matchesNotes = item.notes.lowercased().contains(queryLower)
-                    if !(matchesName || matchesCategory || matchesTag || matchesNotes) {
+                    let matchesSourceURL = item.sourceURL?.localizedStandardContains(searchText) ?? false
+                    let matchesDesigner = item.designer?.localizedStandardContains(searchText) ?? false
+                    let matchesLicense = item.license?.localizedStandardContains(searchText) ?? false
+                    if !(matchesName || matchesCategory || matchesTag || matchesNotes || matchesSourceURL || matchesDesigner || matchesLicense) {
                         return false
                     }
                 }
@@ -307,6 +310,9 @@ struct ContentView: View {
             hasher.combine(item.lastSentToSlicerDate)
             if !searchText.isEmpty {
                 hasher.combine(item.notes)
+                hasher.combine(item.sourceURL)
+                hasher.combine(item.designer)
+                hasher.combine(item.license)
             }
         }
         hasher.combine(categories.count)
@@ -501,7 +507,7 @@ struct ContentView: View {
                 openedGroupID = nil
             }
         }
-        .searchable(text: $searchText, placement: .toolbar, prompt: "Search STL, 3MF, tags, categories...")
+        .searchable(text: $searchText, placement: .toolbar, prompt: "Search STL, 3MF, tags, designer, source...")
         .toolbar {
             toolbarContent
         }
@@ -1441,6 +1447,15 @@ struct ContentView: View {
         }
 
         Divider()
+
+        if let sourceURL = item.resolvedSourceURL {
+            Button(
+                item.isSourceURLBareOrigin ? "Open \(item.sourceHostDisplayName ?? "Source Site")" : "Open Source Page",
+                systemImage: "arrow.up.right.square"
+            ) {
+                NSWorkspace.shared.open(sourceURL)
+            }
+        }
 
         Button {
             NSWorkspace.shared.activateFileViewerSelecting([item.fileURL])

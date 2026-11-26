@@ -13,6 +13,33 @@ public struct DiscoveredFileCandidate: Sendable {
     public let dateModified: Date
     public let source: DiscoverySource
     public let finderTags: [String]
+    public let sourceURL: String?
+    public let designer: String?
+    public let license: String?
+
+    public init(
+        filePath: String,
+        fileName: String,
+        fileExtension: String,
+        fileSize: Int64,
+        dateModified: Date,
+        source: DiscoverySource,
+        finderTags: [String],
+        sourceURL: String? = nil,
+        designer: String? = nil,
+        license: String? = nil
+    ) {
+        self.filePath = filePath
+        self.fileName = fileName
+        self.fileExtension = fileExtension
+        self.fileSize = fileSize
+        self.dateModified = dateModified
+        self.source = source
+        self.finderTags = finderTags
+        self.sourceURL = sourceURL
+        self.designer = designer
+        self.license = license
+    }
 }
 
 // MARK: - FileScannerService
@@ -127,7 +154,7 @@ public final class FileScannerService {
         )
         query.searchScopes = [NSMetadataQueryUserHomeScope]
 
-        var rawItems: [(path: String, size: Int64, modDate: Date)] = []
+        var rawItems: [(path: String, size: Int64, modDate: Date, whereFroms: [String])] = []
 
         if !Task.isCancelled && query.start() {
             @MainActor
@@ -210,7 +237,8 @@ public final class FileScannerService {
 
                     let size = (item.value(forAttribute: NSMetadataItemFSSizeKey) as? NSNumber)?.int64Value ?? 0
                     let modDate = (item.value(forAttribute: NSMetadataItemFSContentChangeDateKey) as? Date) ?? Date()
-                    rawItems.append((path, size, modDate))
+                    let whereFroms = (item.value(forAttribute: "kMDItemWhereFroms") as? [String]) ?? []
+                    rawItems.append((path, size, modDate, whereFroms))
                 }
             }
         }
@@ -323,6 +351,22 @@ public final class FileScannerService {
                     let merged = Set(existing.tags).union(candidate.finderTags)
                     existing.tags = Array(merged).sorted()
                 }
+                let existingURLBlank = existing.sourceURL?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true
+                if let discoveredURL = candidate.sourceURL {
+                    let canUpgradeBareOrigin = DownloadProvenanceService.isBareOriginURL(existing.sourceURL)
+                        && !DownloadProvenanceService.isBareOriginURL(discoveredURL)
+                    if existingURLBlank || canUpgradeBareOrigin {
+                        existing.sourceURL = discoveredURL
+                    }
+                }
+                if (existing.designer?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true),
+                   let discoveredDesigner = candidate.designer {
+                    existing.designer = discoveredDesigner
+                }
+                if (existing.license?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true),
+                   let discoveredLicense = candidate.license {
+                    existing.license = discoveredLicense
+                }
             } else {
                 let autoCat = Self.suggestCategory(
                     fileName: candidate.fileName,
@@ -338,7 +382,10 @@ public final class FileScannerService {
                     dateModified: candidate.dateModified,
                     discoverySource: candidate.source,
                     category: autoCat,
-                    tags: candidate.finderTags
+                    tags: candidate.finderTags,
+                    sourceURL: candidate.sourceURL,
+                    designer: candidate.designer,
+                    license: candidate.license
                 )
                 context.insert(newItem)
                 existingByPath[candidate.filePath] = newItem
@@ -474,7 +521,7 @@ public final class FileScannerService {
     }
 
     private nonisolated static func buildSpotlightCandidatesAsync(
-        from rawItems: [(path: String, size: Int64, modDate: Date)]
+        from rawItems: [(path: String, size: Int64, modDate: Date, whereFroms: [String])]
     ) async -> [DiscoveredFileCandidate] {
         var candidates: [DiscoveredFileCandidate] = []
         candidates.reserveCapacity(rawItems.count)
@@ -482,6 +529,10 @@ public final class FileScannerService {
             if Task.isCancelled { break }
             let url = URL(fileURLWithPath: entry.path)
             let tags = FinderTagService.readTags(for: url)
+            let provenance = DownloadProvenanceService.readProvenance(
+                for: url,
+                spotlightWhereFroms: entry.whereFroms
+            )
             candidates.append(
                 DiscoveredFileCandidate(
                     filePath: entry.path,
@@ -490,7 +541,10 @@ public final class FileScannerService {
                     fileSize: entry.size,
                     dateModified: entry.modDate,
                     source: .spotlight,
-                    finderTags: tags
+                    finderTags: tags,
+                    sourceURL: provenance.sourceURL,
+                    designer: provenance.designer,
+                    license: provenance.license
                 )
             )
         }
@@ -548,6 +602,7 @@ public final class FileScannerService {
         let size = Int64(values.fileSize ?? 0)
         let modified = values.contentModificationDate ?? Date()
         let tags = FinderTagService.readTags(for: url)
+        let provenance = DownloadProvenanceService.readProvenance(for: url)
         return DiscoveredFileCandidate(
             filePath: url.path,
             fileName: url.lastPathComponent,
@@ -555,7 +610,10 @@ public final class FileScannerService {
             fileSize: size,
             dateModified: modified,
             source: source,
-            finderTags: tags
+            finderTags: tags,
+            sourceURL: provenance.sourceURL,
+            designer: provenance.designer,
+            license: provenance.license
         )
     }
 

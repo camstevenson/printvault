@@ -251,6 +251,15 @@ struct ModelGridCardView: View {
 
         Divider()
 
+        if let sourceURL = item.resolvedSourceURL {
+            Button(
+                item.isSourceURLBareOrigin ? "Open \(item.sourceHostDisplayName ?? "Source Site")" : "Open Source Page",
+                systemImage: "arrow.up.right.square"
+            ) {
+                NSWorkspace.shared.open(sourceURL)
+            }
+        }
+
         Button {
             NSWorkspace.shared.activateFileViewerSelecting([item.fileURL])
         } label: {

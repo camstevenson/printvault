@@ -233,6 +233,15 @@ struct InspectorPaneView: View {
 
                     Divider()
 
+                    // Source & Download Provenance
+                    InspectorProvenanceSectionView(
+                        item: item,
+                        containingGroupTitle: containingGroup?.title,
+                        watchedFolderPaths: watchedFolderPaths
+                    )
+
+                    Divider()
+
                     // 3D Geometry & Filament Estimates
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
@@ -312,7 +321,7 @@ struct InspectorPaneView: View {
                                     .font(.caption)
                             }
                             GridRow {
-                                Text("Source")
+                                Text("Indexed Via")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                 Text(item.discoverySourceRaw)
@@ -391,7 +400,7 @@ struct InspectorPaneView: View {
         .sheet(isPresented: $showExpandedPreview) {
             ExpandedPreview3DSheet(item: item, slicerService: slicerService)
         }
-        .onChange(of: item.filePath) { _, _ in
+        .onChange(of: item.filePath) {
             aiFeedbackText = nil
             slicerFeedbackBanner = nil
             newTagText = ""

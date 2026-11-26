@@ -1105,4 +1105,347 @@ struct PrintVaultTests {
         #expect(decoded.syncFinderTagsOnSend == false)
         #expect(decoded.preSliceShellCommand == "echo hi")
     }
+
+    // MARK: - Download Provenance (kMDItemWhereFroms)
+
+    @Test("DownloadProvenanceService selects model pages over CDN downloads, canonicalizes known URLs, infers designers, and rejects non-web schemes")
+    func downloadProvenanceURLResolutionAndValidation() throws {
+        // 1. Printables CDN + referrer page -> picks referrer page
+        let printables = DownloadProvenanceService.extractProvenance(fromWhereFroms: [
+            "https://files.printables.com/media/prints/123456/stls/987654_abc/bin.stl",
+            "https://www.printables.com/model/123456-gridfinity-bin"
+        ])
+        #expect(printables.sourceURL == "https://www.printables.com/model/123456-gridfinity-bin")
+        let printablesURL = try #require(printables.sourceURL.flatMap(URL.init(string:)))
+        #expect(DownloadProvenanceService.displaySiteName(for: printablesURL) == "Printables")
+
+        // 2. Printables CDN only -> canonicalizes to model page
+        let printablesCDNOnly = DownloadProvenanceService.extractProvenance(fromWhereFroms: [
+            "https://files.printables.com/media/prints/554433/stls/112233/tray.stl"
+        ])
+        #expect(printablesCDNOnly.sourceURL == "https://www.printables.com/model/554433")
+
+        // 3. MakerWorld expiring CDN + model page -> picks model page
+        let makerWorld = DownloadProvenanceService.extractProvenance(fromWhereFroms: [
+            "https://makerworld.bblmw.com/makerworld/model/US999/instances/1/dragon.3mf?Expires=1700000000",
+            "https://makerworld.com/en/models/456789-articulated-dragon"
+        ])
+        #expect(makerWorld.sourceURL == "https://makerworld.com/en/models/456789-articulated-dragon")
+        let makerWorldURL = try #require(makerWorld.sourceURL.flatMap(URL.init(string:)))
+        #expect(DownloadProvenanceService.displaySiteName(for: makerWorldURL) == "MakerWorld")
+
+        // 4. Thingiverse zip download -> canonicalizes to thing page
+        let thingiverse = DownloadProvenanceService.extractProvenance(fromWhereFroms: [
+            "https://www.thingiverse.com/thing:2741048/zip"
+        ])
+        #expect(thingiverse.sourceURL == "https://www.thingiverse.com/thing:2741048")
+        let thingiverseURL = try #require(thingiverse.sourceURL.flatMap(URL.init(string:)))
+        #expect(DownloadProvenanceService.displaySiteName(for: thingiverseURL) == "Thingiverse")
+
+        // 5. Thangs referrer extracts designer and page URL
+        let thangs = DownloadProvenanceService.extractProvenance(fromWhereFroms: [
+            "https://storage.googleapis.com/thangs-prod/tile.stl",
+            "https://thangs.com/designer/Multiboard/3d-model/8x8%20Core%20Tile-974217"
+        ])
+        #expect(thangs.sourceURL == "https://thangs.com/designer/Multiboard/3d-model/8x8%20Core%20Tile-974217")
+        #expect(thangs.designer == "Multiboard")
+
+        // 6. GitHub release asset -> picks release page and repo owner as designer
+        let github = DownloadProvenanceService.extractProvenance(fromWhereFroms: [
+            "https://objects.githubusercontent.com/github-production-release-asset/bracket.stl",
+            "https://github.com/VoronDesign/Voron-2/releases/tag/v2.4r2"
+        ])
+        #expect(github.sourceURL == "https://github.com/VoronDesign/Voron-2/releases/tag/v2.4r2")
+        #expect(github.designer == "VoronDesign")
+
+        // 7. Search engine referrer does not override actual model download host
+        let searchReferrer = DownloadProvenanceService.extractProvenance(fromWhereFroms: [
+            "https://example.org/models/bracket.stl",
+            "https://www.google.com/"
+        ])
+        #expect(searchReferrer.sourceURL == "https://example.org/models/bracket.stl")
+
+        // 8. Reject non-http(s) URLs
+        #expect(DownloadProvenanceService.validatedWebURL(from: "javascript:alert(1)") == nil)
+        #expect(DownloadProvenanceService.validatedWebURL(from: "file:///etc/passwd") == nil)
+        #expect(DownloadProvenanceService.validatedWebURL(from: "ftp://example.com/part.stl") == nil)
+        #expect(DownloadProvenanceService.validatedWebURL(from: "   ") == nil)
+        #expect(DownloadProvenanceService.validatedWebURL(from: "https://www.printables.com/model/123")?.host == "www.printables.com")
+    }
+
+    @Test("DownloadProvenanceService reads com.apple.metadata:kMDItemWhereFroms from files and unpacked ancestor folders")
+    func downloadProvenanceExtendedAttributeReading() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Direct file xattr
+        let fileURL = dir.appendingPathComponent("Direct_Download.stl")
+        #expect(SampleMeshGenerator.writeBinarySTL(
+            triangles: SampleMeshGenerator.makeBoxTriangles(min: .zero, max: SIMD3<Float>(10, 10, 10)),
+            headerText: "Direct",
+            to: fileURL
+        ))
+        let wroteDirect = DownloadProvenanceService.writeWhereFroms([
+            "https://files.printables.com/media/prints/424242/stls/part.stl",
+            "https://www.printables.com/model/424242-cable-clip"
+        ], to: fileURL)
+        #expect(wroteDirect == true)
+
+        let directProv = DownloadProvenanceService.readProvenance(for: fileURL)
+        #expect(directProv.sourceURL == "https://www.printables.com/model/424242-cable-clip")
+
+        // Unpacked zip folder fallback (xattr on project folder, nested under `files/`)
+        let projectDir = dir.appendingPathComponent("Baby_Sword_Rattle_1411578", isDirectory: true)
+        let filesSubdir = projectDir.appendingPathComponent("files", isDirectory: true)
+        try FileManager.default.createDirectory(at: filesSubdir, withIntermediateDirectories: true)
+
+        let wroteFolder = DownloadProvenanceService.writeWhereFroms([
+            "https://www.thingiverse.com/thing:1411578/zip",
+            "https://www.thingiverse.com/thing:1411578"
+        ], to: projectDir)
+        #expect(wroteFolder == true)
+
+        let nestedPartURL = filesSubdir.appendingPathComponent("Handle.stl")
+        #expect(SampleMeshGenerator.writeBinarySTL(
+            triangles: SampleMeshGenerator.makeBoxTriangles(min: .zero, max: SIMD3<Float>(10, 10, 10)),
+            headerText: "Nested",
+            to: nestedPartURL
+        ))
+
+        let nestedProv = DownloadProvenanceService.readProvenance(for: nestedPartURL)
+        #expect(nestedProv.sourceURL == "https://www.thingiverse.com/thing:1411578")
+    }
+
+    @Test("FileScannerService persists kMDItemWhereFroms provenance into SwiftData and backfills without overwriting user edits")
+    @MainActor
+    func fileIngestionPersistsAndBackfillsProvenance() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let modelURL = dir.appendingPathComponent("Multiboard_Tile.stl")
+        #expect(SampleMeshGenerator.writeBinarySTL(
+            triangles: SampleMeshGenerator.makeBoxTriangles(min: .zero, max: SIMD3<Float>(20, 20, 5)),
+            headerText: "Tile",
+            to: modelURL
+        ))
+        #expect(DownloadProvenanceService.writeWhereFroms([
+            "https://storage.googleapis.com/thangs-prod/tile.stl",
+            "https://thangs.com/designer/KeepMaking/3d-model/Multiboard-Tile-974217"
+        ], to: modelURL))
+
+        let schema = Schema([PrintFileItem.self, PrintCategory.self, WatchedFolder.self])
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
+        )
+        let ctx = container.mainContext
+        let scanner = FileScannerService()
+
+        // 1. Fresh import reads kMDItemWhereFroms and persists sourceURL & designer
+        let added = await scanner.importURLs([modelURL], into: ctx)
+        #expect(added == 1)
+
+        let items = try ctx.fetch(FetchDescriptor<PrintFileItem>())
+        #expect(items.count == 1)
+        let item = try #require(items.first)
+        #expect(item.sourceURL == "https://thangs.com/designer/KeepMaking/3d-model/Multiboard-Tile-974217")
+        #expect(item.resolvedSourceURL?.absoluteString == "https://thangs.com/designer/KeepMaking/3d-model/Multiboard-Tile-974217")
+        #expect(item.sourceHostDisplayName == "Thangs")
+        #expect(item.designer == "KeepMaking")
+        #expect(item.license == nil)
+
+        // 2. Manual user edits to designer & license persist and are NOT overwritten on re-import
+        item.designer = "Custom Designer"
+        item.license = "CC BY-NC-SA 4.0"
+        item.sourceURL = nil // Simulate legacy record missing sourceURL to test backfill
+        try ctx.save()
+
+        let addedAgain = await scanner.importURLs([modelURL], into: ctx)
+        #expect(addedAgain == 0)
+        #expect(item.sourceURL == "https://thangs.com/designer/KeepMaking/3d-model/Multiboard-Tile-974217")
+        #expect(item.designer == "Custom Designer")
+        #expect(item.license == "CC BY-NC-SA 4.0")
+    }
+
+    @Test("DownloadProvenanceService recovers exact model URLs when browsers strip cross-origin referrers to bare site origins")
+    @MainActor
+    func crossOriginBareReferrerRecovery() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // 1. MakerWorld DSM CDN URL + bare origin referrer -> canonical model URL (NOT bare https://makerworld.com/)
+        let mwCDN = DownloadProvenanceService.extractProvenance(fromWhereFroms: [
+            "https://makerworld.bblmw.com/makerworld/model/DSM00000001200654/msfile/dragon.3mf",
+            "https://makerworld.com/"
+        ])
+        #expect(mwCDN.sourceURL == "https://makerworld.com/en/models/1200654")
+        #expect(DownloadProvenanceService.isBareOriginURL(mwCDN.sourceURL) == false)
+
+        // 2. Printables CDN URL + bare origin referrer -> canonical model URL (NOT bare https://www.printables.com/)
+        let printablesBareRef = DownloadProvenanceService.extractProvenance(fromWhereFroms: [
+            "https://files.printables.com/media/prints/987654/stls/1111_abc/clip.stl",
+            "https://www.printables.com/"
+        ])
+        #expect(printablesBareRef.sourceURL == "https://www.printables.com/model/987654")
+
+        // 3. MakerWorld .3mf with opaque US CDN URL + bare origin referrer -> reads DesignModelId, ProfileId, Designer & License from 3D/3dmodel.model
+        let staging = dir.appendingPathComponent("mw_stage", isDirectory: true)
+        let modelDir = staging.appendingPathComponent("3D", isDirectory: true)
+        try FileManager.default.createDirectory(at: modelDir, withIntermediateDirectories: true)
+        let mwXML = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
+          <metadata name="Application">BambuStudio-01.10.02.76</metadata>
+          <metadata name="DesignModelId">456789</metadata>
+          <metadata name="ProfileId">987654</metadata>
+          <metadata name="Designer">Clockspring3D</metadata>
+          <metadata name="License">Standard Digital File License</metadata>
+          <resources>
+            <object id="1" type="model">
+              <mesh>
+                <vertices>
+                  <vertex x="0" y="0" z="0" />
+                  <vertex x="10" y="0" z="0" />
+                  <vertex x="0" y="10" z="0" />
+                </vertices>
+                <triangles>
+                  <triangle v1="0" v2="1" v3="2" />
+                </triangles>
+              </mesh>
+            </object>
+          </resources>
+          <build>
+            <item objectid="1" />
+          </build>
+        </model>
+        """
+        try mwXML.write(to: modelDir.appendingPathComponent("3dmodel.model"), atomically: true, encoding: .utf8)
+
+        let mw3MFURL = dir.appendingPathComponent("MakerWorld_Model.3mf")
+        let zipProc = Process()
+        zipProc.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
+        zipProc.currentDirectoryURL = staging
+        zipProc.arguments = ["-q", "-r", mw3MFURL.path, "3D"]
+        try zipProc.run()
+        zipProc.waitUntilExit()
+        #expect(zipProc.terminationStatus == 0)
+
+        #expect(DownloadProvenanceService.writeWhereFroms([
+            "https://makerworld.bblmw.com/makerworld/model/USa2397bf7a223fe/msfile/model.3mf?Expires=1700000000",
+            "https://makerworld.com/"
+        ], to: mw3MFURL))
+
+        let mwProv = DownloadProvenanceService.readProvenance(for: mw3MFURL)
+        #expect(mwProv.sourceURL == "https://makerworld.com/en/models/456789#profileId-987654")
+        #expect(mwProv.designer == "Clockspring3D")
+        #expect(mwProv.license == "Standard Digital File License")
+
+        // 4. Thingiverse unpacked zip with bare referrer + README.txt & LICENSE.txt
+        let tvProject = dir.appendingPathComponent("Shaving_Supplies_Stand__2741048", isDirectory: true)
+        let tvFiles = tvProject.appendingPathComponent("files", isDirectory: true)
+        try FileManager.default.createDirectory(at: tvFiles, withIntermediateDirectories: true)
+        try "Shaving Supplies Stand by MakerJoe on Thingiverse: https://www.thingiverse.com/thing:2741048\n".write(
+            to: tvProject.appendingPathComponent("README.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try "This thing was created by Thingiverse user MakerJoe, and is licensed under cc-by-nc-sa.\n".write(
+            to: tvProject.appendingPathComponent("LICENSE.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let tvPartURL = tvFiles.appendingPathComponent("stand.stl")
+        #expect(SampleMeshGenerator.writeBinarySTL(
+            triangles: SampleMeshGenerator.makeBoxTriangles(min: .zero, max: SIMD3<Float>(10, 10, 10)),
+            headerText: "Stand",
+            to: tvPartURL
+        ))
+        #expect(DownloadProvenanceService.writeWhereFroms([
+            "https://cdn.thingiverse.com/assets/ab/cd/stand.stl",
+            "https://www.thingiverse.com/"
+        ], to: tvPartURL))
+
+        let tvProv = DownloadProvenanceService.readProvenance(for: tvPartURL)
+        #expect(tvProv.sourceURL == "https://www.thingiverse.com/thing:2741048")
+        #expect(tvProv.designer == "MakerJoe")
+        #expect(tvProv.license == "CC BY-NC-SA 4.0")
+
+        // 5. Thingiverse unpacked folder WITHOUT README still recovers thing ID when whereFroms confirms Thingiverse
+        let tvNoReadme = dir.appendingPathComponent("Baby_Sword_Rattle_1411578", isDirectory: true)
+        try FileManager.default.createDirectory(at: tvNoReadme, withIntermediateDirectories: true)
+        let tvNoReadmePart = tvNoReadme.appendingPathComponent("Handle.stl")
+        #expect(SampleMeshGenerator.writeBinarySTL(
+            triangles: SampleMeshGenerator.makeBoxTriangles(min: .zero, max: SIMD3<Float>(10, 10, 10)),
+            headerText: "Handle",
+            to: tvNoReadmePart
+        ))
+        #expect(DownloadProvenanceService.writeWhereFroms([
+            "https://cdn.thingiverse.com/assets/12/34/handle.stl",
+            "https://www.thingiverse.com/"
+        ], to: tvNoReadmePart))
+
+        let tvFolderProv = DownloadProvenanceService.readProvenance(for: tvNoReadmePart)
+        #expect(tvFolderProv.sourceURL == "https://www.thingiverse.com/thing:1411578")
+
+        // 6. Existing SwiftData item with a previously saved bare origin URL upgrades automatically on rescan/import
+        let schema = Schema([PrintFileItem.self, PrintCategory.self, WatchedFolder.self])
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
+        )
+        let ctx = container.mainContext
+        let staleItem = PrintFileItem(
+            filePath: mw3MFURL.path,
+            fileName: mw3MFURL.lastPathComponent,
+            fileExtension: "3mf",
+            fileSize: 100,
+            dateModified: Date(),
+            sourceURL: "https://makerworld.com/"
+        )
+        ctx.insert(staleItem)
+        try ctx.save()
+        #expect(staleItem.isSourceURLBareOrigin == true)
+
+        let scanner = FileScannerService()
+        _ = await scanner.importURLs([mw3MFURL], into: ctx)
+        #expect(staleItem.sourceURL == "https://makerworld.com/en/models/456789#profileId-987654")
+        #expect(staleItem.isSourceURLBareOrigin == false)
+        #expect(staleItem.designer == "Clockspring3D")
+        #expect(staleItem.license == "Standard Digital File License")
+
+        // 7. New Printables UUID CDN download + bare homepage referrer -> stays honest bare origin & builds clean Printables search URL
+        let printablesUUID = DownloadProvenanceService.extractProvenance(fromWhereFroms: [
+            "https://files.printables.com/media/prints/01b5e85b-aaff-4539-823b-6226fce21aaa/stls/10400456_c93b8307-debc-4f1b-b2b6-e03d22da173d_62414e43-c26d-4c1e-9ef4-fc1643b740a5/main-paint-station.stl",
+            "https://www.printables.com/"
+        ])
+        #expect(printablesUUID.sourceURL == "https://www.printables.com/")
+        #expect(DownloadProvenanceService.isBareOriginURL(printablesUUID.sourceURL) == true)
+
+        let query = DownloadProvenanceService.suggestedSearchQuery(
+            for: URL(fileURLWithPath: "/Users/tester/Downloads/main-paint-station.stl"),
+            watchedFolderPaths: ["/Users/tester/Downloads"]
+        )
+        #expect(query == "paint station")
+        let printablesHomeURL = try #require(URL(string: "https://www.printables.com/"))
+        let searchURL = DownloadProvenanceService.siteSearchURL(
+            for: printablesHomeURL,
+            query: query
+        )
+        #expect(searchURL?.absoluteString == "https://www.printables.com/search/models?q=paint%20station")
+
+        // CamelCase + version/part noise stripping & group title preference
+        #expect(
+            DownloadProvenanceService.suggestedSearchQuery(
+                for: URL(fileURLWithPath: "/Users/tester/Downloads/MainPaintStation_v2_base_04mm.stl"),
+                watchedFolderPaths: ["/Users/tester/Downloads"]
+            ) == "Paint Station"
+        )
+        #expect(
+            DownloadProvenanceService.suggestedSearchQuery(
+                for: URL(fileURLWithPath: "/Users/tester/Downloads/main-paint-station.stl"),
+                groupTitle: "Modular Paint Station",
+                watchedFolderPaths: ["/Users/tester/Downloads"]
+            ) == "Modular Paint Station"
+        )
+    }
 }

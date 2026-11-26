@@ -25,7 +25,11 @@
 		C9BC0050CACE8AAD2C9E4386 /* FinderTagService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1724A5892F8AAF5358EC3C2D /* FinderTagService.swift */; };
 		DF5E5EFF1010477C8CDB0F8E /* PrintModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 592852C88B23DBD828525BFE /* PrintModels.swift */; };
 		E687A2510EF7C8B846D55F05 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA6BBD9A24062379E7F052A /* ContentView.swift */; };
+		EB613A8C936C49FE51D0F662 /* DownloadProvenanceService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5073E77ABDD3D2080DC4269 /* DownloadProvenanceService.swift */; };
+		ECB140478156B6294BB39FC6 /* DownloadProvenance.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CB9DE622601B4C069D54231 /* DownloadProvenance.swift */; };
+		F160CC340C0515E679EC9D1A /* InspectorProvenanceFieldsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B44B258A71F1F98676063E4 /* InspectorProvenanceFieldsView.swift */; };
 		F30716722C6949DBF72525E1 /* ThumbnailService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD74AE747DFFA76BC68DA8D6 /* ThumbnailService.swift */; };
+		F3106F41368E8D995C7DFAA6 /* InspectorProvenanceSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 161A254F7AEDE0628610EF08 /* InspectorProvenanceSectionView.swift */; };
 		F9492E051030956416C6DD0E /* SlicerService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7A10ED1CCCA650CDD5847B9 /* SlicerService.swift */; };
 		FF1C614218EED79C571BE4A5 /* AICategorizeSheetView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D73C981760C3958376CB092 /* AICategorizeSheetView.swift */; };
 /* End PBXBuildFile section */
@@ -41,7 +45,10 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		0CB9DE622601B4C069D54231 /* DownloadProvenance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadProvenance.swift; sourceTree = "<group>"; };
+		161A254F7AEDE0628610EF08 /* InspectorProvenanceSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InspectorProvenanceSectionView.swift; sourceTree = "<group>"; };
 		1724A5892F8AAF5358EC3C2D /* FinderTagService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinderTagService.swift; sourceTree = "<group>"; };
+		1B44B258A71F1F98676063E4 /* InspectorProvenanceFieldsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InspectorProvenanceFieldsView.swift; sourceTree = "<group>"; };
 		2D73C981760C3958376CB092 /* AICategorizeSheetView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AICategorizeSheetView.swift; sourceTree = "<group>"; };
 		43AEBCF925566A2365170EFC /* PrintVaultTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrintVaultTests.swift; sourceTree = "<group>"; };
 		4AA6BBD9A24062379E7F052A /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -58,6 +65,7 @@
 		C7A10ED1CCCA650CDD5847B9 /* SlicerService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlicerService.swift; sourceTree = "<group>"; };
 		C87968BB4346441AD276559F /* ModelGridCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelGridCardView.swift; sourceTree = "<group>"; };
 		CEE8693706AA8E68D264FFCA /* Preview3DView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Preview3DView.swift; sourceTree = "<group>"; };
+		D5073E77ABDD3D2080DC4269 /* DownloadProvenanceService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadProvenanceService.swift; sourceTree = "<group>"; };
 		DD74AE747DFFA76BC68DA8D6 /* ThumbnailService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThumbnailService.swift; sourceTree = "<group>"; };
 		DF7403208CB6A5511BF0E496 /* PrintVaultApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrintVaultApp.swift; sourceTree = "<group>"; };
 		DFC8B6C96EEC7B7DB1C34AED /* ModelGroupingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelGroupingService.swift; sourceTree = "<group>"; };
@@ -93,6 +101,7 @@
 		4E2A31098ADAE3D7B2C72AEC /* Models */ = {
 			isa = PBXGroup;
 			children = (
+				0CB9DE622601B4C069D54231 /* DownloadProvenance.swift */,
 				592852C88B23DBD828525BFE /* PrintModels.swift */,
 			);
 			path = Models;
@@ -133,6 +142,8 @@
 				2D73C981760C3958376CB092 /* AICategorizeSheetView.swift */,
 				4AA6BBD9A24062379E7F052A /* ContentView.swift */,
 				62291B42C319108A384C8815 /* InspectorPaneView.swift */,
+				1B44B258A71F1F98676063E4 /* InspectorProvenanceFieldsView.swift */,
+				161A254F7AEDE0628610EF08 /* InspectorProvenanceSectionView.swift */,
 				C87968BB4346441AD276559F /* ModelGridCardView.swift */,
 				92C5CDE5E1C618B46B1ECB2E /* ModelGroupCardView.swift */,
 				CEE8693706AA8E68D264FFCA /* Preview3DView.swift */,
@@ -144,6 +155,7 @@
 		D8E5A7932D577018A94C3C3C /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				D5073E77ABDD3D2080DC4269 /* DownloadProvenanceService.swift */,
 				C098A4EEB2EC7D5C52BB87BD /* FileScannerService.swift */,
 				1724A5892F8AAF5358EC3C2D /* FinderTagService.swift */,
 				E4694B5CA2099C7CF8FFBB70 /* MeshLoaderService.swift */,
@@ -261,9 +273,13 @@
 				FF1C614218EED79C571BE4A5 /* AICategorizeSheetView.swift in Sources */,
 				96F8F74348FBA759CB351F9A /* AboutView.swift in Sources */,
 				E687A2510EF7C8B846D55F05 /* ContentView.swift in Sources */,
+				ECB140478156B6294BB39FC6 /* DownloadProvenance.swift in Sources */,
+				EB613A8C936C49FE51D0F662 /* DownloadProvenanceService.swift in Sources */,
 				14B525AF6F16D03D001C0C24 /* FileScannerService.swift in Sources */,
 				C9BC0050CACE8AAD2C9E4386 /* FinderTagService.swift in Sources */,
 				2F6A55801CF9BBDC68E3AA70 /* InspectorPaneView.swift in Sources */,
+				F160CC340C0515E679EC9D1A /* InspectorProvenanceFieldsView.swift in Sources */,
+				F3106F41368E8D995C7DFAA6 /* InspectorProvenanceSectionView.swift in Sources */,
 				A33BE3FDD1FEC693F0839A77 /* MeshLoaderService.swift in Sources */,
 				413A85E61975D4E6543D0EF3 /* ModelGridCardView.swift in Sources */,
 				8995F76F8C91583E4191C6EA /* ModelGroupCardView.swift in Sources */,

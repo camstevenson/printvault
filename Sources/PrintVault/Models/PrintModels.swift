@@ -146,6 +146,11 @@ public final class PrintFileItem {
     public var rating: Int
     public var notes: String
 
+    // Download Provenance & Attribution
+    public var sourceURL: String? = nil
+    public var designer: String? = nil
+    public var license: String? = nil
+
     // 3D Geometry Metrics
     public var meshAnalyzed: Bool
     public var vertexCount: Int
@@ -170,7 +175,10 @@ public final class PrintFileItem {
         dateModified: Date,
         discoverySource: DiscoverySource = .watchedFolder,
         category: PrintCategory? = nil,
-        tags: [String] = []
+        tags: [String] = [],
+        sourceURL: String? = nil,
+        designer: String? = nil,
+        license: String? = nil
     ) {
         self.filePath = filePath
         self.fileName = fileName
@@ -185,6 +193,9 @@ public final class PrintFileItem {
         self.printStatusRaw = PrintStatus.unprinted.rawValue
         self.rating = 0
         self.notes = ""
+        self.sourceURL = sourceURL
+        self.designer = designer
+        self.license = license
         self.meshAnalyzed = false
         self.vertexCount = 0
         self.triangleCount = 0
@@ -337,6 +348,30 @@ public final class PrintFileItem {
 
     public var fileExistsOnDisk: Bool {
         FileManager.default.fileExists(atPath: filePath)
+    }
+
+    /// Validated `http`/`https` source webpage URL suitable for opening in a browser.
+    public var resolvedSourceURL: URL? {
+        DownloadProvenanceService.validatedWebURL(from: sourceURL)
+    }
+
+    /// True when the stored source URL only points to a site's bare homepage (e.g. from cross-origin referrer stripping).
+    public var isSourceURLBareOrigin: Bool {
+        guard let url = resolvedSourceURL else { return false }
+        return DownloadProvenanceService.isBareOriginURL(url)
+    }
+
+    /// Friendly site or domain name for the model's source URL (e.g. "Printables", "MakerWorld").
+    public var sourceHostDisplayName: String? {
+        guard let url = resolvedSourceURL else { return nil }
+        return DownloadProvenanceService.displaySiteName(for: url)
+    }
+
+    /// True if any download provenance or attribution field is populated.
+    public var hasProvenanceMetadata: Bool {
+        resolvedSourceURL != nil
+            || !(designer?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            || !(license?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
     }
 }
 
