@@ -595,7 +595,7 @@ struct ContentView: View {
             List(selection: $selection) {
                 Section("Library") {
                     sidebarRow(
-                        title: "All 3D Models",
+                        title: "All 3D Files",
                         icon: "cube",
                         count: stats.totalCount,
                         tag: .all
@@ -821,17 +821,17 @@ struct ContentView: View {
             // Sub-header bar
             HStack(spacing: 12) {
                 if let opened = activeOpenedGroup {
-                    Text("\(opened.items.count) parts in \(opened.title)")
+                    Text("\(opened.items.count) part\(opened.items.count == 1 ? "" : "s") in \(opened.title)")
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 } else if groupRelatedModels && groupCount > 0 {
-                    Text("\(browserEntries.count) models (\(displayedItems.count) files)")
+                    Text("\(browserEntries.count) group\(browserEntries.count == 1 ? "" : "s") (\(displayedItems.count) file\(displayedItems.count == 1 ? "" : "s"))")
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 } else {
-                    Text("\(displayedItems.count) model\(displayedItems.count == 1 ? "" : "s")")
+                    Text("\(displayedItems.count) file\(displayedItems.count == 1 ? "" : "s")")
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(.secondary)
                 }
